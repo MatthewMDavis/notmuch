@@ -20,6 +20,7 @@
 
 #include "notmuch-client.h"
 
+#include <ctype.h>
 #include <unistd.h>
 
 typedef struct _filename_node {
@@ -53,6 +54,7 @@ typedef struct {
     _filename_list_t *directory_mtimes;
 
     notmuch_bool_t synchronize_flags;
+    notmuch_bool_t add_as_tag_flags;
 } add_files_state_t;
 
 static volatile sig_atomic_t do_print_progress = 0;
@@ -238,6 +240,32 @@ _entry_in_ignore_list (const char *entry, add_files_state_t *state)
 	    return TRUE;
 
     return FALSE;
+}
+
+static void
+_add_maildir_as_tag(notmuch_database_t *notmuch,
+		    notmuch_message_t *msg, const char *path) 
+{
+    char *tok = talloc_strdup (notmuch, path);
+    int len = strlen(tok);
+    
+    /* asserts path ends with /cur|/tmp|/new */
+    if (len > 4 && tok[len - 4] == '/') {
+	char *iter = tok + len - 4;
+	*iter = '\0';
+	while (-- iter && iter >= tok) {
+	    char c = *iter;
+	    if (c == '/' || c == '.') {
+		*iter = '\0';
+		notmuch_message_add_tag (msg, iter + 1);
+		if (c == '/') {
+		    break;
+		}
+	    }
+	    *iter = tolower(*iter);
+	}
+    }
+    talloc_free (tok);
 }
 
 /* Examine 'path' recursively as follows:
@@ -508,6 +536,9 @@ add_files (notmuch_database_t *notmuch,
 	    notmuch_message_freeze (message);
 	    for (tag=state->new_tags; *tag != NULL; tag++)
 	        notmuch_message_add_tag (message, *tag);
+	    if (state->add_as_tag_flags == TRUE) {
+		_add_maildir_as_tag(notmuch, message, path);
+	    }
 	    if (state->synchronize_flags == TRUE)
 		notmuch_message_maildir_flags_to_tags (message);
 	    notmuch_message_thaw (message);
@@ -878,6 +909,7 @@ notmuch_new_command (void *ctx, int argc, char *argv[])
     add_files_state.new_tags = notmuch_config_get_new_tags (config, &add_files_state.new_tags_length);
     add_files_state.new_ignore = notmuch_config_get_new_ignore (config, &add_files_state.new_ignore_length);
     add_files_state.synchronize_flags = notmuch_config_get_maildir_synchronize_flags (config);
+    add_files_state.add_as_tag_flags = notmuch_config_get_maildir_add_as_tag_flags (config);
     db_path = notmuch_config_get_database_path (config);
 
     if (run_hooks) {

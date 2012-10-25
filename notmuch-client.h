@@ -265,6 +265,13 @@ void
 notmuch_config_set_maildir_synchronize_flags (notmuch_config_t *config,
 					      notmuch_bool_t synchronize_flags);
 
+notmuch_bool_t
+notmuch_config_get_maildir_add_as_tag_flags (notmuch_config_t *config);
+
+void
+notmuch_config_set_maildir_add_as_tag_flags (notmuch_config_t *config,
+					     notmuch_bool_t add_as_tag_flags);
+
 const char **
 notmuch_config_get_search_exclude_tags (notmuch_config_t *config, size_t *length);
 

@@ -88,7 +88,16 @@ static const char maildir_config_comment[] =
     "\n"
     "\tThe \"notmuch new\" command will notice flag changes in filenames\n"
     "\tand update tags, while the \"notmuch tag\" and \"notmuch restore\"\n"
-    "\tcommands will notice tag changes and update flags in filenames\n";
+    "\tcommands will notice tag changes and update flags in filenames\n"
+    "\n"
+    "\tadd_as_tag_flags       Valid values are true and false.\n"
+    "\n"
+    "\nIf ture, then add the lower-cased name of maildirs"
+    "\n(also deliminated by .) as tags"
+    "\n"
+    "\n\te.g. Life              -> life"
+    "\n\te.g. MIT.CSAIL         -> mit, csail"
+    "\n\te.g. Mailing.OSS.Linux -> mailing, oss, linux";
 
 static const char search_config_comment[] =
     " Search configuration\n"
@@ -114,6 +123,7 @@ struct _notmuch_config {
     const char **new_ignore;
     size_t new_ignore_length;
     notmuch_bool_t maildir_synchronize_flags;
+    notmuch_bool_t maildir_add_as_tag_flags;
     const char **search_exclude_tags;
     size_t search_exclude_tags_length;
 };
@@ -251,7 +261,7 @@ notmuch_config_open (void *ctx,
 	fprintf (stderr, "Out of memory.\n");
 	return NULL;
     }
-    
+
     talloc_set_destructor (config, notmuch_config_destructor);
 
     if (filename) {
@@ -393,6 +403,14 @@ notmuch_config_open (void *ctx,
 	g_error_free (error);
     }
 
+    config->maildir_add_as_tag_flags =
+	g_key_file_get_boolean (config->key_file,
+				"maildir", "add_as_tag_flags", &error);
+    if (error) {
+	notmuch_config_set_maildir_add_as_tag_flags (config, FALSE);
+	g_error_free (error);
+    }
+
     /* Whenever we know of configuration sections that don't appear in
      * the configuration file, we add some comments to help the user
      * understand what can be done. */
@@ -438,7 +456,7 @@ notmuch_config_open (void *ctx,
 }
 
 /* Close the given notmuch_config_t object, freeing all resources.
- * 
+ *
  * Note: Any changes made to the configuration are *not* saved by this
  * function. To save changes, call notmuch_config_save before
  * notmuch_config_close.
@@ -720,7 +738,7 @@ notmuch_config_command_get (void *ctx, char *item)
     } else if (strcmp(item, "user.other_email") == 0) {
 	const char **other_email;
 	size_t i, length;
-	
+
 	other_email = notmuch_config_get_user_other_email (config, &length);
 	for (i = 0; i < length; i++)
 	    printf ("%s\n", other_email[i]);
@@ -890,4 +908,20 @@ notmuch_config_set_maildir_synchronize_flags (notmuch_config_t *config,
     g_key_file_set_boolean (config->key_file,
 			    "maildir", "synchronize_flags", synchronize_flags);
     config->maildir_synchronize_flags = synchronize_flags;
+}
+
+
+notmuch_bool_t
+notmuch_config_get_maildir_add_as_tag_flags (notmuch_config_t *config)
+{
+    return config->maildir_add_as_tag_flags;
+}
+
+void
+notmuch_config_set_maildir_add_as_tag_flags (notmuch_config_t *config,
+					     notmuch_bool_t add_as_tag_flags)
+{
+    g_key_file_set_boolean (config->key_file,
+			    "maildir", "add_as_tag_flags", add_as_tag_flags);
+    config->maildir_add_as_tag_flags = add_as_tag_flags;
 }
