@@ -403,6 +403,7 @@ notmuch_config_open (void *ctx,
 	g_error_free (error);
     }
 
+    error = NULL;
     config->maildir_add_as_tag_flags =
 	g_key_file_get_boolean (config->key_file,
 				"maildir", "add_as_tag_flags", &error);
