@@ -246,26 +246,24 @@ static void
 _add_maildir_as_tag(notmuch_database_t *notmuch,
 		    notmuch_message_t *msg, const char *path) 
 {
-    char *tok = talloc_strdup (notmuch, path);
-    int len = strlen(tok);
-    
-    /* asserts path ends with /cur|/tmp|/new */
-    if (len > 4 && tok[len - 4] == '/') {
-	char *iter = tok + len - 4;
-	*iter = '\0';
-	while (-- iter && iter >= tok) {
-	    char c = *iter;
-	    if (c == '/' || c == '.') {
-		*iter = '\0';
-		notmuch_message_add_tag (msg, iter + 1);
-		if (c == '/') {
-		    break;
-		}
-	    }
-	    *iter = tolower(*iter);
-	}
+    const char *a = NULL, *b = NULL;
+    char *dir, *tag;
+
+    while ((path = strchr(path, '/'))) {
+        a = b;
+        b = (path ++);
     }
-    talloc_free (tok);
+
+    if (!a || ++a >= b ||
+        (strcmp (b, "/cur") &&
+	 strcmp (b, "/new") &&
+	 strcmp (b, "/tmp")))
+        return;
+
+    dir = talloc_strndup (notmuch, a, b - a);
+    while ((tag = strsep (&dir, ".")))
+        notmuch_message_add_tag (msg, tag);
+    talloc_free (dir);
 }
 
 /* Examine 'path' recursively as follows:
@@ -536,9 +534,8 @@ add_files (notmuch_database_t *notmuch,
 	    notmuch_message_freeze (message);
 	    for (tag=state->new_tags; *tag != NULL; tag++)
 	        notmuch_message_add_tag (message, *tag);
-	    if (state->add_as_tag_flags == TRUE) {
+	    if (state->add_as_tag_flags == TRUE)
 		_add_maildir_as_tag(notmuch, message, path);
-	    }
 	    if (state->synchronize_flags == TRUE)
 		notmuch_message_maildir_flags_to_tags (message);
 	    notmuch_message_thaw (message);
