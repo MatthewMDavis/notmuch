@@ -242,9 +242,20 @@ _entry_in_ignore_list (const char *entry, add_files_state_t *state)
     return FALSE;
 }
 
+static char *
+_to_lower(char *str)
+{
+    char *rtn = str;
+    while (str != '\0') {
+	*str = tolower(*str);
+	str ++;
+    }
+    return rtn;
+}
+
 static void
 _add_maildir_as_tag(notmuch_database_t *notmuch,
-		    notmuch_message_t *msg, const char *path) 
+		    notmuch_message_t *msg, const char *path)
 {
     const char *a = NULL, *b = NULL;
     char *dir, *tag;
@@ -262,7 +273,7 @@ _add_maildir_as_tag(notmuch_database_t *notmuch,
 
     dir = talloc_strndup (notmuch, a, b - a);
     while ((tag = strsep (&dir, ".")))
-        notmuch_message_add_tag (msg, tag);
+        notmuch_message_add_tag (msg, _to_lower(tag));
     talloc_free (dir);
 }
 
