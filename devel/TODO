@@ -34,8 +34,6 @@ current message/thread and make searches not return deleted messages
 by default, (unless the user asks explicitly for deleted messages in
 the search query).
 
-Add keybindings for next/previous thread.
-
 Add support to "mute" a thread (add a "muted" tag and then don't
 display threads in searches by default where any message of the thread
 has the "muted" tag).
@@ -57,33 +55,12 @@ Automatically open a message when navigating to it with N or P.
 
 Change 'a' command in thread-view mode to only archive open messages.
 
-Add a binding to open all closed messages.
-
-Change the 'a'rchive command in the thread view to only archive open
-messages.
-
-Completion
-----------
-Fix bash completion to complete multiple search options (both --first
-and *then* --max-threads), and also complete value for --sort=
-(oldest-first or newest-first).
-
 notmuch command-line tool
 -------------------------
 Add support to "notmuch search" and "notmuch show" to allow for
 listing of duplicate messages, (distinct filenames with the same
 Message-ID). I'm not sure what the option should be named. Perhaps
 --with-duplicates ?
-
-Add a -0 option to "notmuch search" so that one can safely deal with
-any filename with:
-
-	notmuch search --output=files -0 <terms> | xargs -0 <command>
-
-"notmuch setup" should use realpath() before replacing the
-configuration file. The ensures that the final target file of any
-intermediate symbolic links is what is actually replaced, (rather than
-any symbolic link).
 
 Replace "notmuch reply" with "notmuch compose --reply <search-terms>".
 This would enable a plain "notmuch compose" to be used to construct an
@@ -112,18 +89,8 @@ Fix "notmuch restore" to operate in a single pass much like "notmuch
 dump" does, rather than doing N searches into the database, each
 matching 1/N messages.
 
-Add a "-f <filename>" option to select an alternate configuration
-file.
-
 Allow configuration for filename patterns that should be ignored when
 indexing.
-
-Replace the "notmuch part --part=id" command with "notmuch show
---part=id", (David Edmondson wants to rewrite some of "notmuch show" to
-provide more MIME-structure information in its output first).
-
-Replace the "notmuch search-tags" command with "notmuch search
---output=tags".
 
 Fix to avoid this ugly message:
 
@@ -163,12 +130,13 @@ vs. tag-when-all-files-flagged (* above)).
 Add an interface to accept a "key" and a byte stream, rather than a
 filename.
 
-Provide a sane syntax for date ranges. First, we don't want to require
-both endpoints to be specified. For example it would be nice to be
-able to say things like "since:2009-01-1" or "until:2009-01-1" and
-have the other endpoint be implicit. Second we'd like to support
-relative specifications of time such as "since:'2 months ago'". To do
-any of this we're probably going to need to break down an write our
+Improve syntax for date ranges queries. date:expr should be
+interpreted as date:expr..expr so that, for example, "date:2013-01-22"
+would cover the whole of the specified day (currently that's not even
+recognized as a date range expression). It might be nice to be able to
+use things like "since:2013-01-22" and "until:2013-01-22" as synonyms
+to "date:2013-01-22.." and "date:..2013-01-22", respectively. To do
+any of this we're probably going to need to break down and write our
 own parser for the query string rather than using Xapian's QueryParser
 class.
 

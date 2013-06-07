@@ -53,12 +53,13 @@ fi < ./version
 
 readonly VERSION
 
+# In the rest of this file, tests collect list of errors to be fixed
+
 verfail ()
 {
 	echo No.
-	echo "$@"
-	echo "Please follow the instructions in RELEASING to choose a version"
-	exit 1
+	append_emsg "$@"
+	append_emsg "  Please follow the instructions in RELEASING to choose a version"
 }
 
 echo -n "Checking that '$VERSION' is good with digits and periods... "
@@ -72,8 +73,6 @@ case $VERSION in
 	*)	verfail "'$VERSION' is a single number" ;;
 esac
 
-
-# In the rest of this file, tests collect list of errors to be fixed
 
 echo -n "Checking that this is Debian package for notmuch... "
 read deb_notmuch deb_version rest < debian/changelog
@@ -103,6 +102,20 @@ then
 else
 	echo No.
 	append_emsg "Version '$py_version' is not '$VERSION' in $PV_FILE"
+fi
+
+echo -n "Checking that NEWS header is tidy... "
+if [ "`exec sed 's/./=/g; 1q' NEWS`" = "`exec sed '1d; 2q' NEWS`" ]
+then
+	echo Yes.
+else
+	echo No.
+	if [ "`exec sed '1d; s/=//g; 2q' NEWS`" != '' ]
+	then
+		append_emsg "Line 2 in NEWS file is not all '=':s"
+	else
+		append_emsg "Line 2 in NEWS file does not have the same length as line 1"
+	fi
 fi
 
 echo -n "Checking that this is Notmuch NEWS... "

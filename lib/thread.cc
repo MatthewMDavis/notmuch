@@ -35,7 +35,11 @@ struct visible _notmuch_thread {
     char *authors;
     GHashTable *tags;
 
+    /* All messages, oldest first. */
     notmuch_message_list_t *message_list;
+    /* Top-level messages, oldest first. */
+    notmuch_message_list_t *toplevel_list;
+
     GHashTable *message_hash;
     int total_messages;
     int matched_messages;
@@ -186,8 +190,16 @@ _thread_cleanup_author (notmuch_thread_t *thread,
     if (comma && strlen(comma) > 1) {
 	/* let's assemble what we think is the correct name */
 	lname = comma - author;
-	fname = strlen(author) - lname - 2;
-	strncpy(clean_author, comma + 2, fname);
+
+	/* Skip all the spaces after the comma */
+	fname = strlen(author) - lname - 1;
+	comma += 1;
+	while (*comma == ' ') {
+	    fname -= 1;
+	    comma += 1;
+	}
+	strncpy(clean_author, comma, fname);
+
 	*(clean_author+fname) = ' ';
 	strncpy(clean_author + fname + 1, author, lname);
 	*(clean_author+fname+1+lname) = '\0';
@@ -215,7 +227,8 @@ _thread_cleanup_author (notmuch_thread_t *thread,
 static void
 _thread_add_message (notmuch_thread_t *thread,
 		     notmuch_message_t *message,
-		     notmuch_string_list_t *exclude_terms)
+		     notmuch_string_list_t *exclude_terms,
+		     notmuch_exclude_t omit_exclude)
 {
     notmuch_tags_t *tags;
     const char *tag;
@@ -223,6 +236,28 @@ _thread_add_message (notmuch_thread_t *thread,
     InternetAddress *address;
     const char *from, *author;
     char *clean_author;
+    notmuch_bool_t message_excluded = FALSE;
+
+    for (tags = notmuch_message_get_tags (message);
+	 notmuch_tags_valid (tags);
+	 notmuch_tags_move_to_next (tags))
+    {
+	tag = notmuch_tags_get (tags);
+	/* Is message excluded? */
+	for (notmuch_string_node_t *term = exclude_terms->head;
+	     term != NULL;
+	     term = term->next)
+	{
+	    /* We ignore initial 'K'. */
+	    if (strcmp(tag, (term->string + 1)) == 0) {
+		message_excluded = TRUE;
+		break;
+	    }
+	}
+    }
+
+    if (message_excluded && omit_exclude == NOTMUCH_EXCLUDE_ALL)
+	return;
 
     _notmuch_message_list_add_message (thread->message_list,
 				       talloc_steal (thread, message));
@@ -263,17 +298,12 @@ _thread_add_message (notmuch_thread_t *thread,
 	 notmuch_tags_move_to_next (tags))
     {
 	tag = notmuch_tags_get (tags);
-	/* Mark excluded messages. */
-	for (notmuch_string_node_t *term = exclude_terms->head; term;
-	     term = term->next) {
-	    /* We ignore initial 'K'. */
-	    if (strcmp(tag, (term->string + 1)) == 0) {
-		notmuch_message_set_flag (message, NOTMUCH_MESSAGE_FLAG_EXCLUDED, TRUE);
-		break;
-	    }
-	}
 	g_hash_table_insert (thread->tags, xstrdup (tag), NULL);
     }
+
+    /* Mark excluded messages. */
+    if (message_excluded)
+	notmuch_message_set_flag (message, NOTMUCH_MESSAGE_FLAG_EXCLUDED, TRUE);
 }
 
 static void
@@ -345,29 +375,22 @@ _thread_add_matched_message (notmuch_thread_t *thread,
 }
 
 static void
-_resolve_thread_relationships (unused (notmuch_thread_t *thread))
+_resolve_thread_relationships (notmuch_thread_t *thread)
 {
-    notmuch_message_node_t **prev, *node;
+    notmuch_message_node_t *node;
     notmuch_message_t *message, *parent;
     const char *in_reply_to;
 
-    prev = &thread->message_list->head;
-    while ((node = *prev)) {
+    for (node = thread->message_list->head; node; node = node->next) {
 	message = node->message;
 	in_reply_to = _notmuch_message_get_in_reply_to (message);
 	if (in_reply_to && strlen (in_reply_to) &&
 	    g_hash_table_lookup_extended (thread->message_hash,
 					  in_reply_to, NULL,
 					  (void **) &parent))
-	{
-	    *prev = node->next;
-	    if (thread->message_list->tail == &node->next)
-		thread->message_list->tail = prev;
-	    node->next = NULL;
-	    _notmuch_message_add_reply (parent, node);
-	} else {
-	    prev = &((*prev)->next);
-	}
+	    _notmuch_message_add_reply (parent, message);
+	else
+	    _notmuch_message_list_add_message (thread->toplevel_list, message);
     }
 
     /* XXX: After scanning through the entire list looking for parents
@@ -404,9 +427,11 @@ _notmuch_thread_create (void *ctx,
 			unsigned int seed_doc_id,
 			notmuch_doc_id_set_t *match_set,
 			notmuch_string_list_t *exclude_terms,
+			notmuch_exclude_t omit_excluded,
 			notmuch_sort_t sort)
 {
-    notmuch_thread_t *thread;
+    void *local = talloc_new (ctx);
+    notmuch_thread_t *thread = NULL;
     notmuch_message_t *seed_message;
     const char *thread_id;
     char *thread_id_query_string;
@@ -415,24 +440,23 @@ _notmuch_thread_create (void *ctx,
     notmuch_messages_t *messages;
     notmuch_message_t *message;
 
-    seed_message = _notmuch_message_create (ctx, notmuch, seed_doc_id, NULL);
+    seed_message = _notmuch_message_create (local, notmuch, seed_doc_id, NULL);
     if (! seed_message)
 	INTERNAL_ERROR ("Thread seed message %u does not exist", seed_doc_id);
 
     thread_id = notmuch_message_get_thread_id (seed_message);
-    thread_id_query_string = talloc_asprintf (ctx, "thread:%s", thread_id);
+    thread_id_query_string = talloc_asprintf (local, "thread:%s", thread_id);
     if (unlikely (thread_id_query_string == NULL))
-	return NULL;
+	goto DONE;
 
-    thread_id_query = notmuch_query_create (notmuch, thread_id_query_string);
+    thread_id_query = talloc_steal (
+	local, notmuch_query_create (notmuch, thread_id_query_string));
     if (unlikely (thread_id_query == NULL))
-	return NULL;
+	goto DONE;
 
-    talloc_free (thread_id_query_string);
-
-    thread = talloc (ctx, notmuch_thread_t);
+    thread = talloc (local, notmuch_thread_t);
     if (unlikely (thread == NULL))
-	return NULL;
+	goto DONE;
 
     talloc_set_destructor (thread, _notmuch_thread_destructor);
 
@@ -451,8 +475,12 @@ _notmuch_thread_create (void *ctx,
 					  free, NULL);
 
     thread->message_list = _notmuch_message_list_create (thread);
-    if (unlikely (thread->message_list == NULL))
-	return NULL;
+    thread->toplevel_list = _notmuch_message_list_create (thread);
+    if (unlikely (thread->message_list == NULL ||
+		  thread->toplevel_list == NULL)) {
+	thread = NULL;
+	goto DONE;
+    }
 
     thread->message_hash = g_hash_table_new_full (g_str_hash, g_str_equal,
 						  free, NULL);
@@ -479,7 +507,7 @@ _notmuch_thread_create (void *ctx,
 	if (doc_id == seed_doc_id)
 	    message = seed_message;
 
-	_thread_add_message (thread, message, exclude_terms);
+	_thread_add_message (thread, message, exclude_terms, omit_excluded);
 
 	if ( _notmuch_doc_id_set_contains (match_set, doc_id)) {
 	    _notmuch_doc_id_set_remove (match_set, doc_id);
@@ -489,17 +517,26 @@ _notmuch_thread_create (void *ctx,
 	_notmuch_message_close (message);
     }
 
-    notmuch_query_destroy (thread_id_query);
-
     _resolve_thread_authors_string (thread);
 
     _resolve_thread_relationships (thread);
 
+    /* Commit to returning thread. */
+    talloc_steal (ctx, thread);
+
+  DONE:
+    talloc_free (local);
     return thread;
 }
 
 notmuch_messages_t *
 notmuch_thread_get_toplevel_messages (notmuch_thread_t *thread)
+{
+    return _notmuch_messages_create (thread->toplevel_list);
+}
+
+notmuch_messages_t *
+notmuch_thread_get_messages (notmuch_thread_t *thread)
 {
     return _notmuch_messages_create (thread->message_list);
 }

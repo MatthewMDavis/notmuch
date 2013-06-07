@@ -28,7 +28,7 @@ struct _notmuch_query {
     const char *query_string;
     notmuch_sort_t sort;
     notmuch_string_list_t *exclude_terms;
-    notmuch_bool_t omit_excluded;
+    notmuch_exclude_t omit_excluded;
 };
 
 typedef struct _notmuch_mset_messages {
@@ -39,12 +39,12 @@ typedef struct _notmuch_mset_messages {
 } notmuch_mset_messages_t;
 
 struct _notmuch_doc_id_set {
-    unsigned int *bitmap;
+    unsigned char *bitmap;
     unsigned int bound;
 };
 
-#define DOCIDSET_WORD(bit) ((bit) / sizeof (unsigned int))
-#define DOCIDSET_BIT(bit) ((bit) % sizeof (unsigned int))
+#define DOCIDSET_WORD(bit) ((bit) / CHAR_BIT)
+#define DOCIDSET_BIT(bit) ((bit) % CHAR_BIT)
 
 struct visible _notmuch_threads {
     notmuch_query_t *query;
@@ -92,7 +92,7 @@ notmuch_query_create (notmuch_database_t *notmuch,
 
     query->exclude_terms = _notmuch_string_list_create (query);
 
-    query->omit_excluded = TRUE;
+    query->omit_excluded = NOTMUCH_EXCLUDE_TRUE;
 
     return query;
 }
@@ -104,7 +104,8 @@ notmuch_query_get_query_string (notmuch_query_t *query)
 }
 
 void
-notmuch_query_set_omit_excluded (notmuch_query_t *query, notmuch_bool_t omit_excluded)
+notmuch_query_set_omit_excluded (notmuch_query_t *query,
+				 notmuch_exclude_t omit_excluded)
 {
     query->omit_excluded = omit_excluded;
 }
@@ -220,7 +221,7 @@ notmuch_query_search_messages (notmuch_query_t *query)
 	if (query->exclude_terms) {
 	    exclude_query = _notmuch_exclude_tags (query, final_query);
 
-	    if (query->omit_excluded)
+	    if (query->omit_excluded != NOTMUCH_EXCLUDE_FALSE)
 		final_query = Xapian::Query (Xapian::Query::OP_AND_NOT,
 					     final_query, exclude_query);
 	    else {
@@ -359,11 +360,11 @@ _notmuch_doc_id_set_init (void *ctx,
 			  GArray *arr)
 {
     unsigned int max = 0;
-    unsigned int *bitmap;
+    unsigned char *bitmap;
 
     for (unsigned int i = 0; i < arr->len; i++)
 	max = MAX(max, g_array_index (arr, unsigned int, i));
-    bitmap = talloc_zero_array (ctx, unsigned int, 1 + max / sizeof (*bitmap));
+    bitmap = talloc_zero_array (ctx, unsigned char, DOCIDSET_WORD(max) + 1);
 
     if (bitmap == NULL)
 	return FALSE;
@@ -486,6 +487,7 @@ notmuch_threads_get (notmuch_threads_t *threads)
 				   doc_id,
 				   &threads->match_set,
 				   threads->query->exclude_terms,
+				   threads->query->omit_excluded,
 				   threads->query->sort);
 }
 

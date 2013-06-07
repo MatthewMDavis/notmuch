@@ -13,10 +13,7 @@ my $NMBGIT = $ENV{NMBGIT} || $ENV{HOME}.'/.nmbug';
 
 $NMBGIT .= '/.git' if (-d $NMBGIT.'/.git');
 
-my $TAGPREFIX = $ENV{NMBPREFIX} || 'notmuch::';
-
-# magic hash for git
-my $EMPTYBLOB = 'e69de29bb2d1d6434b8b29ae775ad8c2e48c5391';
+my $TAGPREFIX = defined($ENV{NMBPREFIX}) ? $ENV{NMBPREFIX} : 'notmuch::';
 
 # for encoding
 
@@ -39,11 +36,19 @@ my %command = (
 	     status	=> \&do_status,
 	     );
 
+# Convert prefix into form suitable for literal matching against
+# notmuch dump --format=batch-tag output.
+my $ENCPREFIX = encode_for_fs ($TAGPREFIX);
+$ENCPREFIX =~ s/:/%3a/g;
+
 my $subcommand = shift || usage ();
 
 if (!exists $command{$subcommand}) {
   usage ();
 }
+
+# magic hash for git
+my $EMPTYBLOB = git (qw{hash-object -t blob /dev/null});
 
 &{$command{$subcommand}}(@ARGV);
 
@@ -203,9 +208,9 @@ sub index_tags {
 
   my $index = $NMBGIT.'/nmbug.index';
 
-  my $query = join ' ', map ("tag:$_", get_tags ($TAGPREFIX));
+  my $query = join ' ', map ("tag:\"$_\"", get_tags ($TAGPREFIX));
 
-  my $fh = spawn ('-|', qw/notmuch dump --/, $query)
+  my $fh = spawn ('-|', qw/notmuch dump --format=batch-tag --/, $query)
     or die "notmuch dump: $!";
 
   git ('read-tree', '--empty');
@@ -214,22 +219,30 @@ sub index_tags {
     or die 'git update-index';
 
   while (<$fh>) {
-    m/ ( [^ ]* ) \s+ \( ([^\)]* ) \) /x || die 'syntax error in dump';
-    my ($id,$rest) = ($1,$2);
 
-    #strip prefixes before writing
-    my @tags = grep { s/^$TAGPREFIX//; } split (' ', $rest);
+    chomp();
+    my ($rest,$id) = split(/ -- id:/);
+
+    if ($id =~ s/^"(.*)"\s*$/$1/) {
+      # xapian quoted string, dequote.
+      $id =~ s/""/"/g;
+    }
+
+    #strip prefixes from tags before writing
+    my @tags = grep { s/^[+]$ENCPREFIX//; } split (' ', $rest);
     index_tags_for_msg ($git,$id, 'A', @tags);
   }
   unless (close $git) {
     die "'git update-index --index-info' exited with nonzero value\n";
   }
   unless (close $fh) {
-    die "'notmuch dump -- $query' exited with nonzero value\n";
+    die "'notmuch dump --format=batch-tag -- $query' exited with nonzero value\n";
   }
   return $index;
 }
 
+# update the git index to either create or delete an empty file.
+# Neither argument should be encoded/escaped.
 sub index_tags_for_msg {
   my $fh = shift;
   my $msgid = shift;
@@ -254,6 +267,20 @@ sub do_checkout {
   do_sync (action => 'checkout');
 }
 
+sub quote_for_xapian {
+  my $str = shift;
+  $str =~ s/"/""/g;
+  return '"' . $str . '"';
+}
+
+sub pair_to_batch_line {
+  my ($action, $pair) = @_;
+
+  # the tag should already be suitably encoded
+
+  return $action . $ENCPREFIX . $pair->{tag} .
+    ' -- id:' . quote_for_xapian ($pair->{id})."\n";
+}
 
 sub do_sync {
 
@@ -270,17 +297,20 @@ sub do_sync {
     $D_action = '-';
   }
 
-  foreach my $pair (@{$status->{added}}) {
+  my $notmuch = spawn ({}, '|-', qw/notmuch tag --batch/)
+    or die 'notmuch tag --batch';
 
-    notmuch ('tag', $A_action.$TAGPREFIX.$pair->{tag},
-	     'id:'.$pair->{id});
+  foreach my $pair (@{$status->{added}}) {
+    print $notmuch pair_to_batch_line ($A_action, $pair);
   }
 
   foreach my $pair (@{$status->{deleted}}) {
-    notmuch ('tag', $D_action.$TAGPREFIX.$pair->{tag},
-	     'id:'.$pair->{id});
+    print $notmuch pair_to_batch_line ($D_action, $pair);
   }
 
+  unless (close $notmuch) {
+    die "'notmuch tag --batch' exited with nonzero value\n";
+  }
 }
 
 
@@ -331,7 +361,7 @@ sub do_log {
 sub do_push {
   my $remote = shift || 'origin';
 
-  git ('push', $remote);
+  git ('push', $remote, 'master');
 }
 
 

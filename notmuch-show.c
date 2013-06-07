@@ -32,12 +32,17 @@ static const notmuch_show_format_t format_text = {
 };
 
 static notmuch_status_t
-format_part_json_entry (const void *ctx, sprinter_t *sp, mime_node_t *node,
-			int indent, const notmuch_show_params_t *params);
+format_part_sprinter_entry (const void *ctx, sprinter_t *sp, mime_node_t *node,
+			    int indent, const notmuch_show_params_t *params);
 
 static const notmuch_show_format_t format_json = {
     .new_sprinter = sprinter_json_create,
-    .part = format_part_json_entry,
+    .part = format_part_sprinter_entry,
+};
+
+static const notmuch_show_format_t format_sexp = {
+    .new_sprinter = sprinter_sexp_create,
+    .part = format_part_sprinter_entry,
 };
 
 static notmuch_status_t
@@ -108,8 +113,11 @@ _get_one_line_summary (const void *ctx, notmuch_message_t *message)
 /* Emit a sequence of key/value pairs for the metadata of message.
  * The caller should begin a map before calling this. */
 static void
-format_message_json (sprinter_t *sp, notmuch_message_t *message)
+format_message_sprinter (sprinter_t *sp, notmuch_message_t *message)
 {
+    /* Any changes to the JSON or S-Expression format should be
+     * reflected in the file devel/schemata. */
+
     void *local = talloc_new (NULL);
     notmuch_tags_t *tags;
     time_t date;
@@ -205,11 +213,15 @@ _is_from_line (const char *line)
 }
 
 void
-format_headers_json (sprinter_t *sp, GMimeMessage *message,
-		     notmuch_bool_t reply)
+format_headers_sprinter (sprinter_t *sp, GMimeMessage *message,
+			 notmuch_bool_t reply)
 {
+    /* Any changes to the JSON or S-Expression format should be
+     * reflected in the file devel/schemata. */
+
     InternetAddressList *recipients;
     const char *recipients_string;
+    const char *reply_to_string;
 
     sp->begin_map (sp);
 
@@ -238,6 +250,12 @@ format_headers_json (sprinter_t *sp, GMimeMessage *message,
     if (recipients_string) {
 	sp->map_key (sp, "Bcc");
 	sp->string (sp, recipients_string);
+    }
+
+    reply_to_string = g_mime_message_get_reply_to (message);
+    if (reply_to_string) {
+	sp->map_key (sp, "Reply-To");
+	sp->string (sp, reply_to_string);
     }
 
     if (reply) {
@@ -317,6 +335,8 @@ show_text_part_content (GMimeObject *part, GMimeStream *stream_out,
 }
 
 #ifdef GMIME_ATLEAST_26
+
+/* Get signature status string (GMime 2.6) */
 static const char*
 signature_status_to_string (GMimeSignatureStatus x)
 {
@@ -330,28 +350,14 @@ signature_status_to_string (GMimeSignatureStatus x)
     }
     return "unknown";
 }
-#else
-static const char*
-signer_status_to_string (GMimeSignerStatus x)
-{
-    switch (x) {
-    case GMIME_SIGNER_STATUS_NONE:
-	return "none";
-    case GMIME_SIGNER_STATUS_GOOD:
-	return "good";
-    case GMIME_SIGNER_STATUS_BAD:
-	return "bad";
-    case GMIME_SIGNER_STATUS_ERROR:
-	return "error";
-    }
-    return "unknown";
-}
-#endif
 
-#ifdef GMIME_ATLEAST_26
+/* Signature status sprinter (GMime 2.6) */
 static void
-format_part_sigstatus_json (sprinter_t *sp, mime_node_t *node)
+format_part_sigstatus_sprinter (sprinter_t *sp, mime_node_t *node)
 {
+    /* Any changes to the JSON or S-Expression format should be
+     * reflected in the file devel/schemata. */
+
     GMimeSignatureList *siglist = node->sig_list;
 
     sp->begin_list (sp);
@@ -420,9 +426,29 @@ format_part_sigstatus_json (sprinter_t *sp, mime_node_t *node)
 
     sp->end (sp);
 }
-#else
+
+#else /* GMIME_ATLEAST_26 */
+
+/* Get signature status string (GMime 2.4) */
+static const char*
+signer_status_to_string (GMimeSignerStatus x)
+{
+    switch (x) {
+    case GMIME_SIGNER_STATUS_NONE:
+	return "none";
+    case GMIME_SIGNER_STATUS_GOOD:
+	return "good";
+    case GMIME_SIGNER_STATUS_BAD:
+	return "bad";
+    case GMIME_SIGNER_STATUS_ERROR:
+	return "error";
+    }
+    return "unknown";
+}
+
+/* Signature status sprinter (GMime 2.4) */
 static void
-format_part_sigstatus_json (sprinter_t *sp, mime_node_t *node)
+format_part_sigstatus_sprinter (sprinter_t *sp, mime_node_t *node)
 {
     const GMimeSignatureValidity* validity = node->sig_validity;
 
@@ -483,7 +509,8 @@ format_part_sigstatus_json (sprinter_t *sp, mime_node_t *node)
 
     sp->end (sp);
 }
-#endif
+
+#endif /* GMIME_ATLEAST_26 */
 
 static notmuch_status_t
 format_part_text (const void *ctx, sprinter_t *sp, mime_node_t *node,
@@ -578,24 +605,47 @@ format_part_text (const void *ctx, sprinter_t *sp, mime_node_t *node,
     return NOTMUCH_STATUS_SUCCESS;
 }
 
-void
-format_part_json (const void *ctx, sprinter_t *sp, mime_node_t *node,
-		  notmuch_bool_t first, notmuch_bool_t output_body)
+static void
+format_omitted_part_meta_sprinter (sprinter_t *sp, GMimeObject *meta, GMimePart *part)
 {
-    /* Any changes to the JSON format should be reflected in the file
-     * devel/schemata. */
+    const char *content_charset = g_mime_object_get_content_type_parameter (meta, "charset");
+    const char *cte = g_mime_object_get_header (meta, "content-transfer-encoding");
+    GMimeDataWrapper *wrapper = g_mime_part_get_content_object (part);
+    GMimeStream *stream = g_mime_data_wrapper_get_stream (wrapper);
+    ssize_t content_length = g_mime_stream_length (stream);
+
+    if (content_charset != NULL) {
+	sp->map_key (sp, "content-charset");
+	sp->string (sp, content_charset);
+    }
+    if (cte != NULL) {
+	sp->map_key (sp, "content-transfer-encoding");
+	sp->string (sp, cte);
+    }
+    if (content_length >= 0) {
+	sp->map_key (sp, "content-length");
+	sp->integer (sp, content_length);
+    }
+}
+
+void
+format_part_sprinter (const void *ctx, sprinter_t *sp, mime_node_t *node,
+		      notmuch_bool_t first, notmuch_bool_t output_body)
+{
+    /* Any changes to the JSON or S-Expression format should be
+     * reflected in the file devel/schemata. */
 
     if (node->envelope_file) {
 	sp->begin_map (sp);
-	format_message_json (sp, node->envelope_file);
+	format_message_sprinter (sp, node->envelope_file);
 
 	sp->map_key (sp, "headers");
-	format_headers_json (sp, GMIME_MESSAGE (node->part), FALSE);
+	format_headers_sprinter (sp, GMIME_MESSAGE (node->part), FALSE);
 
 	if (output_body) {
 	    sp->map_key (sp, "body");
 	    sp->begin_list (sp);
-	    format_part_json (ctx, sp, mime_node_child (node, 0), first, TRUE);
+	    format_part_sprinter (ctx, sp, mime_node_child (node, 0), first, TRUE);
 	    sp->end (sp);
 	}
 	sp->end (sp);
@@ -630,7 +680,7 @@ format_part_json (const void *ctx, sprinter_t *sp, mime_node_t *node,
 
     if (node->verify_attempted) {
 	sp->map_key (sp, "sigstatus");
-	format_part_sigstatus_json (sp, node);
+	format_part_sigstatus_sprinter (sp, node);
     }
 
     sp->map_key (sp, "content-type");
@@ -656,14 +706,9 @@ format_part_json (const void *ctx, sprinter_t *sp, mime_node_t *node,
 	 * makes charset decoding the responsibility on the caller, we
 	 * report the charset for text/html parts.
 	 */
-	if (g_mime_content_type_is_type (content_type, "text", "html")) {
-	    const char *content_charset = g_mime_object_get_content_type_parameter (meta, "charset");
-
-	    if (content_charset != NULL) {
-		sp->map_key (sp, "content-charset");
-		sp->string (sp, content_charset);
-	    }
-	} else if (g_mime_content_type_is_type (content_type, "text", "*")) {
+	if (g_mime_content_type_is_type (content_type, "text", "*") &&
+	    ! g_mime_content_type_is_type (content_type, "text", "html"))
+	{
 	    GMimeStream *stream_memory = g_mime_stream_mem_new ();
 	    GByteArray *part_content;
 	    show_text_part_content (node->part, stream_memory, 0);
@@ -671,6 +716,8 @@ format_part_json (const void *ctx, sprinter_t *sp, mime_node_t *node,
 	    sp->map_key (sp, "content");
 	    sp->string_len (sp, (char *) part_content->data, part_content->len);
 	    g_object_unref (stream_memory);
+	} else {
+	    format_omitted_part_meta_sprinter (sp, meta, GMIME_PART (node->part));
 	}
     } else if (GMIME_IS_MULTIPART (node->part)) {
 	sp->map_key (sp, "content");
@@ -682,7 +729,7 @@ format_part_json (const void *ctx, sprinter_t *sp, mime_node_t *node,
 	sp->begin_map (sp);
 
 	sp->map_key (sp, "headers");
-	format_headers_json (sp, GMIME_MESSAGE (node->part), FALSE);
+	format_headers_sprinter (sp, GMIME_MESSAGE (node->part), FALSE);
 
 	sp->map_key (sp, "body");
 	sp->begin_list (sp);
@@ -690,7 +737,7 @@ format_part_json (const void *ctx, sprinter_t *sp, mime_node_t *node,
     }
 
     for (i = 0; i < node->nchildren; i++)
-	format_part_json (ctx, sp, mime_node_child (node, i), i == 0, TRUE);
+	format_part_sprinter (ctx, sp, mime_node_child (node, i), i == 0, TRUE);
 
     /* Close content structures */
     for (i = 0; i < nclose; i++)
@@ -700,11 +747,11 @@ format_part_json (const void *ctx, sprinter_t *sp, mime_node_t *node,
 }
 
 static notmuch_status_t
-format_part_json_entry (const void *ctx, sprinter_t *sp,
-			mime_node_t *node, unused (int indent),
-			const notmuch_show_params_t *params)
+format_part_sprinter_entry (const void *ctx, sprinter_t *sp,
+			    mime_node_t *node, unused (int indent),
+			    const notmuch_show_params_t *params)
 {
-    format_part_json (ctx, sp, node, TRUE, params->output_body);
+    format_part_sprinter (ctx, sp, node, TRUE, params->output_body);
 
     return NOTMUCH_STATUS_SUCCESS;
 }
@@ -996,6 +1043,7 @@ do_show (void *ctx,
 enum {
     NOTMUCH_FORMAT_NOT_SPECIFIED,
     NOTMUCH_FORMAT_JSON,
+    NOTMUCH_FORMAT_SEXP,
     NOTMUCH_FORMAT_TEXT,
     NOTMUCH_FORMAT_MBOX,
     NOTMUCH_FORMAT_RAW
@@ -1014,9 +1062,8 @@ enum {
 };
 
 int
-notmuch_show_command (void *ctx, unused (int argc), unused (char *argv[]))
+notmuch_show_command (notmuch_config_t *config, int argc, char *argv[])
 {
-    notmuch_config_t *config;
     notmuch_database_t *notmuch;
     notmuch_query_t *query;
     char *query_string;
@@ -1040,9 +1087,11 @@ notmuch_show_command (void *ctx, unused (int argc), unused (char *argv[]))
 	{ NOTMUCH_OPT_KEYWORD, &format_sel, "format", 'f',
 	  (notmuch_keyword_t []){ { "json", NOTMUCH_FORMAT_JSON },
 				  { "text", NOTMUCH_FORMAT_TEXT },
+				  { "sexp", NOTMUCH_FORMAT_SEXP },
 				  { "mbox", NOTMUCH_FORMAT_MBOX },
 				  { "raw", NOTMUCH_FORMAT_RAW },
 				  { 0, 0 } } },
+	{ NOTMUCH_OPT_INT, &notmuch_format_version, "format-version", 0, 0 },
 	{ NOTMUCH_OPT_KEYWORD, &exclude, "exclude", 'x',
 	  (notmuch_keyword_t []){ { "true", EXCLUDE_TRUE },
 				  { "false", EXCLUDE_FALSE },
@@ -1084,6 +1133,9 @@ notmuch_show_command (void *ctx, unused (int argc), unused (char *argv[]))
     case NOTMUCH_FORMAT_TEXT:
 	format = &format_text;
 	break;
+    case NOTMUCH_FORMAT_SEXP:
+	format = &format_sexp;
+	break;
     case NOTMUCH_FORMAT_MBOX:
 	if (params.part > 0) {
 	    fprintf (stderr, "Error: specifying parts is incompatible with mbox output format.\n");
@@ -1102,9 +1154,12 @@ notmuch_show_command (void *ctx, unused (int argc), unused (char *argv[]))
 	break;
     }
 
-    /* Default is entire-thread = FALSE except for format=json. */
+    notmuch_exit_if_unsupported_format ();
+
+    /* Default is entire-thread = FALSE except for format=json and
+     * format=sexp. */
     if (entire_thread == ENTIRE_THREAD_DEFAULT) {
-	if (format == &format_json)
+	if (format == &format_json || format == &format_sexp)
 	    entire_thread = ENTIRE_THREAD_TRUE;
 	else
 	    entire_thread = ENTIRE_THREAD_FALSE;
@@ -1115,8 +1170,9 @@ notmuch_show_command (void *ctx, unused (int argc), unused (char *argv[]))
 	    fprintf (stderr, "Warning: --body=false is incompatible with --part > 0. Disabling.\n");
 	    params.output_body = TRUE;
 	} else {
-	    if (format != &format_json)
-		fprintf (stderr, "Warning: --body=false only implemented for format=json\n");
+	    if (format != &format_json && format != &format_sexp)
+		fprintf (stderr,
+			 "Warning: --body=false only implemented for format=json and format=sexp\n");
 	}
     }
 
@@ -1125,11 +1181,7 @@ notmuch_show_command (void *ctx, unused (int argc), unused (char *argv[]))
     else
 	params.entire_thread = FALSE;
 
-    config = notmuch_config_open (ctx, NULL, NULL);
-    if (config == NULL)
-	return 1;
-
-    query_string = query_string_from_args (ctx, argc-opt_index, argv+opt_index);
+    query_string = query_string_from_args (config, argc-opt_index, argv+opt_index);
     if (query_string == NULL) {
 	fprintf (stderr, "Out of memory\n");
 	return 1;
@@ -1151,11 +1203,11 @@ notmuch_show_command (void *ctx, unused (int argc), unused (char *argv[]))
     }
 
     /* Create structure printer. */
-    sprinter = format->new_sprinter(ctx, stdout);
+    sprinter = format->new_sprinter(config, stdout);
 
     /* If a single message is requested we do not use search_excludes. */
     if (params.part >= 0)
-	ret = do_show_single (ctx, query, format, sprinter, &params);
+	ret = do_show_single (config, query, format, sprinter, &params);
     else {
 	/* We always apply set the exclude flag. The
 	 * exclude=true|false option controls whether or not we return
@@ -1174,7 +1226,7 @@ notmuch_show_command (void *ctx, unused (int argc), unused (char *argv[]))
 	    params.omit_excluded = FALSE;
 	}
 
-	ret = do_show (ctx, query, format, sprinter, &params);
+	ret = do_show (config, query, format, sprinter, &params);
     }
 
     notmuch_crypto_cleanup (&params.crypto);

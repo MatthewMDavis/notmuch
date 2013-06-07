@@ -500,14 +500,22 @@ typedef enum {
 const char *
 notmuch_query_get_query_string (notmuch_query_t *query);
 
+/* Exclude values for notmuch_query_set_omit_excluded */
+typedef enum {
+    NOTMUCH_EXCLUDE_FALSE,
+    NOTMUCH_EXCLUDE_TRUE,
+    NOTMUCH_EXCLUDE_ALL
+} notmuch_exclude_t;
+
 /* Specify whether to omit excluded results or simply flag them.  By
  * default, this is set to TRUE.
  *
- * If this is TRUE, notmuch_query_search_messages will omit excluded
- * messages from the results.  notmuch_query_search_threads will omit
- * threads that match only in excluded messages, but will include all
- * messages in threads that match in at least one non-excluded
- * message.
+ * If set to TRUE or ALL, notmuch_query_search_messages will omit excluded
+ * messages from the results, and notmuch_query_search_threads will omit
+ * threads that match only in excluded messages.  If set to TRUE,
+ * notmuch_query_search_threads will include all messages in threads that
+ * match in at least one non-excluded message.  Otherwise, if set to ALL,
+ * notmuch_query_search_threads will omit excluded messages from all threads.
  *
  * The performance difference when calling
  * notmuch_query_search_messages should be relatively small (and both
@@ -516,9 +524,9 @@ notmuch_query_get_query_string (notmuch_query_t *query);
  * excluded messages as it does not need to construct the threads that
  * only match in excluded messages.
  */
-
 void
-notmuch_query_set_omit_excluded (notmuch_query_t *query, notmuch_bool_t omit_excluded);
+notmuch_query_set_omit_excluded (notmuch_query_t *query,
+				 notmuch_exclude_t omit_excluded);
 
 /* Specify the sorting desired for this query. */
 void
@@ -719,19 +727,20 @@ int
 notmuch_thread_get_total_messages (notmuch_thread_t *thread);
 
 /* Get a notmuch_messages_t iterator for the top-level messages in
- * 'thread'.
+ * 'thread' in oldest-first order.
  *
  * This iterator will not necessarily iterate over all of the messages
  * in the thread. It will only iterate over the messages in the thread
  * which are not replies to other messages in the thread.
- *
- * To iterate over all messages in the thread, the caller will need to
- * iterate over the result of notmuch_message_get_replies for each
- * top-level message (and do that recursively for the resulting
- * messages, etc.).
  */
 notmuch_messages_t *
 notmuch_thread_get_toplevel_messages (notmuch_thread_t *thread);
+
+/* Get a notmuch_thread_t iterator for all messages in 'thread' in
+ * oldest-first order.
+ */
+notmuch_messages_t *
+notmuch_thread_get_messages (notmuch_thread_t *thread);
 
 /* Get the number of messages in 'thread' that matched the search.
  *

@@ -42,10 +42,11 @@ typedef struct sprinter {
      */
     void (*map_key) (struct sprinter *, const char *);
 
-    /* Insert a separator (usually extra whitespace) for improved
-     * readability without affecting the abstract syntax of the
-     * structure being printed.
-     * For JSON, this could simply be a line break.
+    /* Insert a separator (usually extra whitespace). For the text
+     * printers, this is a syntactic separator. For the structured
+     * printers, this is for improved readability without affecting
+     * the abstract syntax of the structure being printed. For JSON,
+     * this could simply be a line break.
      */
     void (*separator) (struct sprinter *);
 
@@ -66,8 +67,18 @@ typedef struct sprinter {
 struct sprinter *
 sprinter_text_create (const void *ctx, FILE *stream);
 
+/* Create a new unstructured printer that emits the text format for
+ * "notmuch search", with each field separated by a null character
+ * instead of the newline character. */
+struct sprinter *
+sprinter_text0_create (const void *ctx, FILE *stream);
+
 /* Create a new structure printer that emits JSON. */
 struct sprinter *
 sprinter_json_create (const void *ctx, FILE *stream);
+
+/* Create a new structure printer that emits S-Expressions. */
+struct sprinter *
+sprinter_sexp_create (const void *ctx, FILE *stream);
 
 #endif // NOTMUCH_SPRINTER_H

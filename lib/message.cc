@@ -266,18 +266,18 @@ _notmuch_message_get_term (notmuch_message_t *message,
 			   const char *prefix)
 {
     int prefix_len = strlen (prefix);
-    const char *term = NULL;
     char *value;
 
     i.skip_to (prefix);
 
-    if (i != end)
-	term = (*i).c_str ();
-
-    if (!term || strncmp (term, prefix, prefix_len))
+    if (i == end)
 	return NULL;
 
-    value = talloc_strdup (message, term + prefix_len);
+    std::string term = *i;
+    if (strncmp (term.c_str(), prefix, prefix_len))
+	return NULL;
+
+    value = talloc_strdup (message, term.c_str() + prefix_len);
 
 #if DEBUG_DATABASE_SANITY
     i++;
@@ -462,9 +462,9 @@ notmuch_message_get_thread_id (notmuch_message_t *message)
 
 void
 _notmuch_message_add_reply (notmuch_message_t *message,
-			    notmuch_message_node_t *reply)
+			    notmuch_message_t *reply)
 {
-    _notmuch_message_list_append (message->replies, reply);
+    _notmuch_message_list_add_message (message->replies, reply);
 }
 
 notmuch_messages_t *
@@ -788,7 +788,9 @@ notmuch_message_get_tags (notmuch_message_t *message)
      * possible to modify the message tags (which talloc_unlink's the
      * current list from the message) while still iterating because
      * the iterator will keep the current list alive. */
-    talloc_reference (message, message->tag_list);
+    if (!talloc_reference (message, message->tag_list))
+	return NULL;
+
     return tags;
 }
 

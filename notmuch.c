@@ -22,65 +22,62 @@
 
 #include "notmuch-client.h"
 
-typedef int (*command_function_t) (void *ctx, int argc, char *argv[]);
+typedef int (*command_function_t) (notmuch_config_t *config, int argc, char *argv[]);
 
 typedef struct command {
     const char *name;
     command_function_t function;
-    const char *arguments;
+    notmuch_bool_t create_config;
     const char *summary;
 } command_t;
 
-#define MAX_ALIAS_SUBSTITUTIONS 3
-
-typedef struct alias {
-    const char *name;
-    const char *substitutions[MAX_ALIAS_SUBSTITUTIONS];
-} alias_t;
-
-alias_t aliases[] = {
-    { "part", { "show", "--format=raw"}},
-    { "search-tags", {"search", "--output=tags", "*"}}
-};
+static int
+notmuch_help_command (notmuch_config_t *config, int argc, char *argv[]);
 
 static int
-notmuch_help_command (void *ctx, int argc, char *argv[]);
+notmuch_command (notmuch_config_t *config, int argc, char *argv[]);
 
 static command_t commands[] = {
-    { "setup", notmuch_setup_command,
-      NULL,
+    { NULL, notmuch_command, TRUE,
+      "Notmuch main command." },
+    { "setup", notmuch_setup_command, TRUE,
       "Interactively setup notmuch for first use." },
-    { "new", notmuch_new_command,
-      "[options...]",
+    { "new", notmuch_new_command, FALSE,
       "Find and import new messages to the notmuch database." },
-    { "search", notmuch_search_command,
-      "[options...] <search-terms> [...]",
+    { "search", notmuch_search_command, FALSE,
       "Search for messages matching the given search terms." },
-    { "show", notmuch_show_command,
-      "<search-terms> [...]",
+    { "show", notmuch_show_command, FALSE,
       "Show all messages matching the search terms." },
-    { "count", notmuch_count_command,
-      "[options...] <search-terms> [...]",
+    { "count", notmuch_count_command, FALSE,
       "Count messages matching the search terms." },
-    { "reply", notmuch_reply_command,
-      "[options...] <search-terms> [...]",
+    { "reply", notmuch_reply_command, FALSE,
       "Construct a reply template for a set of messages." },
-    { "tag", notmuch_tag_command,
-      "+<tag>|-<tag> [...] [--] <search-terms> [...]" ,
+    { "tag", notmuch_tag_command, FALSE,
       "Add/remove tags for all messages matching the search terms." },
-    { "dump", notmuch_dump_command,
-      "[<filename>] [--] [<search-terms>]",
+    { "dump", notmuch_dump_command, FALSE,
       "Create a plain-text dump of the tags for each message." },
-    { "restore", notmuch_restore_command,
-      "[--accumulate] [<filename>]",
+    { "restore", notmuch_restore_command, FALSE,
       "Restore the tags from the given dump file (see 'dump')." },
-    { "config", notmuch_config_command,
-      "[get|set] <section>.<item> [value ...]",
+    { "config", notmuch_config_command, FALSE,
       "Get or set settings in the notmuch configuration file." },
-    { "help", notmuch_help_command,
-      "[<command>]",
+    { "help", notmuch_help_command, TRUE, /* create but don't save config */
       "This message, or more detailed help for the named command." }
 };
+
+static command_t *
+find_command (const char *name)
+{
+    size_t i;
+
+    for (i = 0; i < ARRAY_SIZE (commands); i++)
+	if ((!name && !commands[i].name) ||
+	    (name && commands[i].name && strcmp (name, commands[i].name) == 0))
+	    return &commands[i];
+
+    return NULL;
+}
+
+int notmuch_format_version;
 
 static void
 usage (FILE *out)
@@ -99,14 +96,41 @@ usage (FILE *out)
     for (i = 0; i < ARRAY_SIZE (commands); i++) {
 	command = &commands[i];
 
-	fprintf (out, "  %-11s  %s\n",
-		 command->name, command->summary);
+	if (command->name)
+	    fprintf (out, "  %-11s  %s\n", command->name, command->summary);
     }
 
     fprintf (out, "\n");
     fprintf (out,
     "Use \"notmuch help <command>\" for more details on each command\n"
     "and \"notmuch help search-terms\" for the common search-terms syntax.\n\n");
+}
+
+void
+notmuch_exit_if_unsupported_format (void)
+{
+    if (notmuch_format_version > NOTMUCH_FORMAT_CUR) {
+	fprintf (stderr, "\
+A caller requested output format version %d, but the installed notmuch\n\
+CLI only supports up to format version %d.  You may need to upgrade your\n\
+notmuch CLI.\n",
+		 notmuch_format_version, NOTMUCH_FORMAT_CUR);
+	exit (NOTMUCH_EXIT_FORMAT_TOO_NEW);
+    } else if (notmuch_format_version < NOTMUCH_FORMAT_MIN) {
+	fprintf (stderr, "\
+A caller requested output format version %d, which is no longer supported\n\
+by the notmuch CLI (it requires at least version %d).  You may need to\n\
+upgrade your notmuch front-end.\n",
+		 notmuch_format_version, NOTMUCH_FORMAT_MIN);
+	exit (NOTMUCH_EXIT_FORMAT_TOO_OLD);
+    } else if (notmuch_format_version != NOTMUCH_FORMAT_CUR) {
+	/* Warn about old version requests so compatibility issues are
+	 * less likely when we drop support for a deprecated format
+	 * versions. */
+	fprintf (stderr, "\
+A caller requested deprecated output format version %d, which may not\n\
+be supported in the future.\n", notmuch_format_version);
+    }
 }
 
 static void
@@ -119,10 +143,9 @@ exec_man (const char *page)
 }
 
 static int
-notmuch_help_command (void *ctx, int argc, char *argv[])
+notmuch_help_command (notmuch_config_t *config, int argc, char *argv[])
 {
     command_t *command;
-    unsigned int i;
 
     argc--; argv++; /* Ignore "help" */
 
@@ -141,13 +164,10 @@ notmuch_help_command (void *ctx, int argc, char *argv[])
 	return 0;
     }
 
-    for (i = 0; i < ARRAY_SIZE (commands); i++) {
-	command = &commands[i];
-
-	if (strcmp (argv[0], command->name) == 0) {
-	    char *page = talloc_asprintf (ctx, "notmuch-%s", command->name);
-	    exec_man (page);
-	}
+    command = find_command (argv[0]);
+    if (command) {
+	char *page = talloc_asprintf (config, "notmuch-%s", command->name);
+	exec_man (page);
     }
 
     if (strcmp (argv[0], "search-terms") == 0) {
@@ -167,29 +187,23 @@ notmuch_help_command (void *ctx, int argc, char *argv[])
  * to be more clever about this in the future.
  */
 static int
-notmuch (void *ctx)
+notmuch_command (notmuch_config_t *config,
+		 unused(int argc), unused(char *argv[]))
 {
-    notmuch_config_t *config;
-    notmuch_bool_t is_new;
     char *db_path;
     struct stat st;
-
-    config = notmuch_config_open (ctx, NULL, &is_new);
 
     /* If the user has never configured notmuch, then run
      * notmuch_setup_command which will give a nice welcome message,
      * and interactively guide the user through the configuration. */
-    if (is_new) {
-	notmuch_config_close (config);
-	return notmuch_setup_command (ctx, 0, NULL);
-    }
+    if (notmuch_config_is_new (config))
+	return notmuch_setup_command (config, 0, NULL);
 
     /* Notmuch is already configured, but is there a database? */
-    db_path = talloc_asprintf (ctx, "%s/%s",
+    db_path = talloc_asprintf (config, "%s/%s",
 			       notmuch_config_get_database_path (config),
 			       ".notmuch");
     if (stat (db_path, &st)) {
-	notmuch_config_close (config);
 	if (errno != ENOENT) {
 	    fprintf (stderr, "Error looking for notmuch database at %s: %s\n",
 		     db_path, strerror (errno));
@@ -221,8 +235,32 @@ notmuch (void *ctx)
 	    notmuch_config_get_user_name (config),
 	    notmuch_config_get_user_primary_email (config));
 
-    notmuch_config_close (config);
+    return 0;
+}
 
+static int
+redirect_stderr (const char * stderr_file)
+{
+    if (strcmp (stderr_file, "-") == 0) {
+	if (dup2 (STDOUT_FILENO, STDERR_FILENO) < 0) {
+	    perror ("dup2");
+	    return 1;
+	}
+    } else {
+	int fd = open (stderr_file, O_WRONLY|O_CREAT|O_TRUNC, 0666);
+	if (fd < 0) {
+	    fprintf (stderr, "Error: Cannot redirect stderr to '%s': %s\n",
+		     stderr_file, strerror (errno));
+	    return 1;
+	}
+	if (fd != STDERR_FILENO) {
+	    if (dup2 (fd, STDERR_FILENO) < 0) {
+		perror ("dup2");
+		return 1;
+	    }
+	    close (fd);
+	}
+    }
     return 0;
 }
 
@@ -230,10 +268,23 @@ int
 main (int argc, char *argv[])
 {
     void *local;
+    char *talloc_report;
+    const char *command_name = NULL;
     command_t *command;
-    alias_t *alias;
-    unsigned int i, j;
-    const char **argv_local;
+    char *config_file_name = NULL;
+    char *stderr_file = NULL;
+    notmuch_config_t *config;
+    notmuch_bool_t print_help=FALSE, print_version=FALSE;
+    int opt_index;
+    int ret = 0;
+
+    notmuch_opt_desc_t options[] = {
+	{ NOTMUCH_OPT_BOOLEAN, &print_help, "help", 'h', 0 },
+	{ NOTMUCH_OPT_BOOLEAN, &print_version, "version", 'v', 0 },
+	{ NOTMUCH_OPT_STRING, &config_file_name, "config", 'c', 0 },
+	{ NOTMUCH_OPT_STRING, &stderr_file, "stderr", '\0', 0 },
+	{ 0, 0, 0, 0, 0 }
+    };
 
     talloc_enable_null_tracking ();
 
@@ -242,62 +293,62 @@ main (int argc, char *argv[])
     g_mime_init (0);
     g_type_init ();
 
-    if (argc == 1)
-	return notmuch (local);
+    /* Globally default to the current output format version. */
+    notmuch_format_version = NOTMUCH_FORMAT_CUR;
 
-    if (STRNCMP_LITERAL (argv[1], "--help") == 0)
+    opt_index = parse_arguments (argc, argv, options, 1);
+    if (opt_index < 0) {
+	/* diagnostics already printed */
+	return 1;
+    }
+
+    if (stderr_file && redirect_stderr (stderr_file) != 0) {
+	/* error already printed */
+	return 1;
+    }
+    if (print_help)
 	return notmuch_help_command (NULL, argc - 1, &argv[1]);
 
-    if (STRNCMP_LITERAL (argv[1], "--version") == 0) {
+    if (print_version) {
 	printf ("notmuch " STRINGIFY(NOTMUCH_VERSION) "\n");
 	return 0;
     }
 
-    for (i = 0; i < ARRAY_SIZE (aliases); i++) {
-	alias = &aliases[i];
+    if (opt_index < argc)
+	command_name = argv[opt_index];
 
-	if (strcmp (argv[1], alias->name) == 0)
-	{
-	    int substitutions;
+    command = find_command (command_name);
+    if (!command) {
+	fprintf (stderr, "Error: Unknown command '%s' (see \"notmuch help\")\n",
+		 command_name);
+	return 1;
+    }
 
-	    argv_local = talloc_size (local, sizeof (char *) *
-				      (argc + MAX_ALIAS_SUBSTITUTIONS - 1));
-	    if (argv_local == NULL) {
-		fprintf (stderr, "Out of memory.\n");
-		return 1;
-	    }
+    config = notmuch_config_open (local, config_file_name, command->create_config);
+    if (!config)
+	return 1;
 
-	    /* Copy all substution arguments from the alias. */
-	    argv_local[0] = argv[0];
-	    for (j = 0; j < MAX_ALIAS_SUBSTITUTIONS; j++) {
-		if (alias->substitutions[j] == NULL)
-		    break;
-		argv_local[j+1] = alias->substitutions[j];
-	    }
-	    substitutions = j;
+    ret = (command->function)(config, argc - opt_index, argv + opt_index);
 
-	    /* And copy all original arguments (skipping the argument
-	     * that matched the alias of course. */
-	    for (j = 2; j < (unsigned) argc; j++) {
-		argv_local[substitutions+j-1] = argv[j];
-	    }
+    notmuch_config_close (config);
 
-	    argc += substitutions - 1;
-	    argv = (char **) argv_local;
+    talloc_report = getenv ("NOTMUCH_TALLOC_REPORT");
+    if (talloc_report && strcmp (talloc_report, "") != 0) {
+	/* this relies on the previous call to
+	 * talloc_enable_null_tracking
+	 */
+
+	FILE *report = fopen (talloc_report, "w");
+	if (report) {
+	    talloc_report_full (NULL, report);
+	} else {
+	    ret = 1;
+	    fprintf (stderr, "ERROR: unable to write talloc log. ");
+	    perror (talloc_report);
 	}
     }
 
-    for (i = 0; i < ARRAY_SIZE (commands); i++) {
-	command = &commands[i];
-
-	if (strcmp (argv[1], command->name) == 0)
-	    return (command->function) (local, argc - 1, &argv[1]);
-    }
-
-    fprintf (stderr, "Error: Unknown command '%s' (see \"notmuch help\")\n",
-	     argv[1]);
-
     talloc_free (local);
 
-    return 1;
+    return ret;
 }

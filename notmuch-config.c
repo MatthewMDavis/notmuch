@@ -49,8 +49,9 @@ static const char new_config_comment[] =
     "\tignore	A list (separated by ';') of file and directory names\n"
     "\t	that will not be searched for messages by \"notmuch new\".\n"
     "\n"
-    "\t	NOTE: *Every* file/directory that goes by one of those names will\n"
-    "\t	be ignored, independent of its depth/location in the mail store.\n";
+    "\t	NOTE: *Every* file/directory that goes by one of those\n"
+    "\t	names will be ignored, independent of its depth/location\n"
+    "\t	in the mail store.\n";
 
 static const char user_config_comment[] =
     " User configuration\n"
@@ -112,6 +113,7 @@ static const char search_config_comment[] =
 struct _notmuch_config {
     char *filename;
     GKeyFile *key_file;
+    notmuch_bool_t is_new;
 
     char *database_path;
     char *user_name;
@@ -241,10 +243,9 @@ get_username_from_passwd_file (void *ctx)
 notmuch_config_t *
 notmuch_config_open (void *ctx,
 		     const char *filename,
-		     notmuch_bool_t *is_new_ret)
+		     notmuch_bool_t create_new)
 {
     GError *error = NULL;
-    int is_new = 0;
     size_t tmp;
     char *notmuch_config_env = NULL;
     int file_had_database_group;
@@ -252,9 +253,6 @@ notmuch_config_open (void *ctx,
     int file_had_user_group;
     int file_had_maildir_group;
     int file_had_search_group;
-
-    if (is_new_ret)
-	*is_new_ret = 0;
 
     notmuch_config_t *config = talloc (ctx, notmuch_config_t);
     if (config == NULL) {
@@ -275,6 +273,7 @@ notmuch_config_open (void *ctx,
 
     config->key_file = g_key_file_new ();
 
+    config->is_new = FALSE;
     config->database_path = NULL;
     config->user_name = NULL;
     config->user_primary_email = NULL;
@@ -293,17 +292,16 @@ notmuch_config_open (void *ctx,
 				     G_KEY_FILE_KEEP_COMMENTS,
 				     &error))
     {
-	/* If the caller passed a non-NULL value for is_new_ret, then
-	 * the caller is prepared for a default configuration file in
-	 * the case of FILE NOT FOUND. Otherwise, any read failure is
-	 * an error.
+	/* If create_new is true, then the caller is prepared for a
+	 * default configuration file in the case of FILE NOT
+	 * FOUND. Otherwise, any read failure is an error.
 	 */
-	if (is_new_ret &&
+	if (create_new &&
 	    error->domain == G_FILE_ERROR &&
 	    error->code == G_FILE_ERROR_NOENT)
 	{
 	    g_error_free (error);
-	    is_new = 1;
+	    config->is_new = TRUE;
 	}
 	else
 	{
@@ -386,7 +384,7 @@ notmuch_config_open (void *ctx,
     }
 
     if (notmuch_config_get_search_exclude_tags (config, &tmp) == NULL) {
-	if (is_new) {
+	if (config->is_new) {
 	    const char *tags[] = { "deleted", "spam" };
 	    notmuch_config_set_search_exclude_tags (config, tags, 2);
 	} else {
@@ -415,43 +413,29 @@ notmuch_config_open (void *ctx,
     /* Whenever we know of configuration sections that don't appear in
      * the configuration file, we add some comments to help the user
      * understand what can be done. */
-    if (is_new)
-    {
+    if (config->is_new)
 	g_key_file_set_comment (config->key_file, NULL, NULL,
 				toplevel_config_comment, NULL);
-    }
 
     if (! file_had_database_group)
-    {
 	g_key_file_set_comment (config->key_file, "database", NULL,
 				database_config_comment, NULL);
-    }
 
     if (! file_had_new_group)
-    {
 	g_key_file_set_comment (config->key_file, "new", NULL,
 				new_config_comment, NULL);
-    }
 
     if (! file_had_user_group)
-    {
 	g_key_file_set_comment (config->key_file, "user", NULL,
 				user_config_comment, NULL);
-    }
 
     if (! file_had_maildir_group)
-    {
 	g_key_file_set_comment (config->key_file, "maildir", NULL,
 				maildir_config_comment, NULL);
-    }
 
-    if (! file_had_search_group) {
+    if (! file_had_search_group)
 	g_key_file_set_comment (config->key_file, "search", NULL,
 				search_config_comment, NULL);
-    }
-
-    if (is_new_ret)
-	*is_new_ret = is_new;
 
     return config;
 }
@@ -479,7 +463,7 @@ int
 notmuch_config_save (notmuch_config_t *config)
 {
     size_t length;
-    char *data;
+    char *data, *filename;
     GError *error = NULL;
 
     data = g_key_file_to_data (config->key_file, &length, NULL);
@@ -488,17 +472,49 @@ notmuch_config_save (notmuch_config_t *config)
 	return 1;
     }
 
-    if (! g_file_set_contents (config->filename, data, length, &error)) {
-	fprintf (stderr, "Error saving configuration to %s: %s\n",
-		 config->filename, error->message);
+    /* Try not to overwrite symlinks. */
+    filename = realpath (config->filename, NULL);
+    if (! filename) {
+	if (errno == ENOENT) {
+	    filename = strdup (config->filename);
+	    if (! filename) {
+		fprintf (stderr, "Out of memory.\n");
+		g_free (data);
+		return 1;
+	    }
+	} else {
+	    fprintf (stderr, "Error canonicalizing %s: %s\n", config->filename,
+		     strerror (errno));
+	    g_free (data);
+	    return 1;
+	}
+    }
+
+    if (! g_file_set_contents (filename, data, length, &error)) {
+	if (strcmp (filename, config->filename) != 0) {
+	    fprintf (stderr, "Error saving configuration to %s (-> %s): %s\n",
+		     config->filename, filename, error->message);
+	} else {
+	    fprintf (stderr, "Error saving configuration to %s: %s\n",
+		     filename, error->message);
+	}
 	g_error_free (error);
+	free (filename);
 	g_free (data);
 	return 1;
     }
 
+    free (filename);
     g_free (data);
     return 0;
 }
+
+notmuch_bool_t
+notmuch_config_is_new (notmuch_config_t *config)
+{
+    return config->is_new;
+}
+
 
 static const char **
 _config_get_list (notmuch_config_t *config,
@@ -722,14 +738,8 @@ _item_split (char *item, char **group, char **key)
 }
 
 static int
-notmuch_config_command_get (void *ctx, char *item)
+notmuch_config_command_get (notmuch_config_t *config, char *item)
 {
-    notmuch_config_t *config;
-
-    config = notmuch_config_open (ctx, NULL, NULL);
-    if (config == NULL)
-	return 1;
-
     if (strcmp(item, "database.path") == 0) {
 	printf ("%s\n", notmuch_config_get_database_path (config));
     } else if (strcmp(item, "user.name") == 0) {
@@ -773,23 +783,15 @@ notmuch_config_command_get (void *ctx, char *item)
 	g_strfreev (value);
     }
 
-    notmuch_config_close (config);
-
     return 0;
 }
 
 static int
-notmuch_config_command_set (void *ctx, char *item, int argc, char *argv[])
+notmuch_config_command_set (notmuch_config_t *config, char *item, int argc, char *argv[])
 {
-    notmuch_config_t *config;
     char *group, *key;
-    int ret;
 
     if (_item_split (item, &group, &key))
-	return 1;
-
-    config = notmuch_config_open (ctx, NULL, NULL);
-    if (config == NULL)
 	return 1;
 
     /* With only the name of an item, we clear it from the
@@ -812,22 +814,14 @@ notmuch_config_command_set (void *ctx, char *item, int argc, char *argv[])
 	break;
     }
 
-    ret = notmuch_config_save (config);
-    notmuch_config_close (config);
-
-    return ret;
+    return notmuch_config_save (config);
 }
 
 static int
-notmuch_config_command_list (void *ctx)
+notmuch_config_command_list (notmuch_config_t *config)
 {
-    notmuch_config_t *config;
     char **groups;
     size_t g, groups_length;
-
-    config = notmuch_config_open (ctx, NULL, NULL);
-    if (config == NULL)
-	return 1;
 
     groups = g_key_file_get_groups (config->key_file, &groups_length);
     if (groups == NULL)
@@ -858,13 +852,11 @@ notmuch_config_command_list (void *ctx)
 
     g_strfreev (groups);
 
-    notmuch_config_close (config);
-
     return 0;
 }
 
 int
-notmuch_config_command (void *ctx, int argc, char *argv[])
+notmuch_config_command (notmuch_config_t *config, int argc, char *argv[])
 {
     argc--; argv++; /* skip subcommand argument */
 
@@ -879,16 +871,16 @@ notmuch_config_command (void *ctx, int argc, char *argv[])
 		     "one argument.\n");
 	    return 1;
 	}
-	return notmuch_config_command_get (ctx, argv[1]);
+	return notmuch_config_command_get (config, argv[1]);
     } else if (strcmp (argv[0], "set") == 0) {
 	if (argc < 2) {
 	    fprintf (stderr, "Error: notmuch config set requires at least "
 		     "one argument.\n");
 	    return 1;
 	}
-	return notmuch_config_command_set (ctx, argv[1], argc - 2, argv + 2);
+	return notmuch_config_command_set (config, argv[1], argc - 2, argv + 2);
     } else if (strcmp (argv[0], "list") == 0) {
-	return notmuch_config_command_list (ctx);
+	return notmuch_config_command_list (config);
     }
 
     fprintf (stderr, "Unrecognized argument for notmuch config: %s\n",

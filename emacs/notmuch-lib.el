@@ -77,7 +77,8 @@
 (defvar notmuch-search-history nil
   "Variable to store notmuch searches history.")
 
-(defcustom notmuch-saved-searches nil
+(defcustom notmuch-saved-searches '(("inbox" . "tag:inbox")
+				    ("unread" . "tag:unread"))
   "A list of saved searches to display."
   :type '(alist :key-type string :value-type string)
   :group 'notmuch-hello)
@@ -96,29 +97,40 @@ For example, if you wanted to remove an \"inbox\" tag and add an
   :group 'notmuch-search
   :group 'notmuch-show)
 
-(defvar notmuch-folders nil
-  "Deprecated name for what is now known as `notmuch-saved-searches'.")
+;; By default clicking on a button does not select the window
+;; containing the button (as opposed to clicking on a widget which
+;; does). This means that the button action is then executed in the
+;; current selected window which can cause problems if the button
+;; changes the buffer (e.g., id: links) or moves point.
+;;
+;; This provides a button type which overrides mouse-action so that
+;; the button's window is selected before the action is run. Other
+;; notmuch buttons can get the same behaviour by inheriting from this
+;; button type.
+(define-button-type 'notmuch-button-type
+  'mouse-action (lambda (button)
+		  (select-window (posn-window (event-start last-input-event)))
+		  (button-activate button)))
 
-(defun notmuch-saved-searches ()
-  "Common function for querying the notmuch-saved-searches variable.
+(defun notmuch-command-to-string (&rest args)
+  "Synchronously invoke \"notmuch\" with the given list of arguments.
 
-We do this as a function to support the old name of the
-variable (`notmuch-folders') as well as for the default value if
-the user hasn't set this variable with the old or new value."
-  (if notmuch-saved-searches
-      notmuch-saved-searches
-    (if notmuch-folders
-	notmuch-folders
-      '(("inbox" . "tag:inbox")
-	("unread" . "tag:unread")))))
+If notmuch exits with a non-zero status, output from the process
+will appear in a buffer named \"*Notmuch errors*\" and an error
+will be signaled.
+
+Otherwise the output will be returned"
+  (with-temp-buffer
+    (let* ((status (apply #'call-process notmuch-command nil t nil args))
+	   (output (buffer-string)))
+      (notmuch-check-exit-status status (cons notmuch-command args) output)
+      output)))
 
 (defun notmuch-version ()
   "Return a string with the notmuch version number."
   (let ((long-string
 	 ;; Trim off the trailing newline.
-	 (substring (shell-command-to-string
-		     (concat notmuch-command " --version"))
-		    0 -1)))
+	 (substring (notmuch-command-to-string "--version") 0 -1)))
     (if (string-match "^notmuch\\( version\\)? \\(.*\\)$"
 		      long-string)
 	(match-string 2 long-string)
@@ -127,9 +139,7 @@ the user hasn't set this variable with the old or new value."
 (defun notmuch-config-get (item)
   "Return a value from the notmuch configuration."
   ;; Trim off the trailing newline
-  (substring (shell-command-to-string
-	      (concat notmuch-command " config get " item))
-	      0 -1))
+  (substring (notmuch-command-to-string "config" "get" item) 0 -1))
 
 (defun notmuch-database-path ()
   "Return the database.path value from the notmuch configuration."
@@ -161,16 +171,36 @@ the user hasn't set this variable with the old or new value."
 	"[No Subject]"
       subject)))
 
+(defun notmuch-escape-boolean-term (term)
+  "Escape a boolean term for use in a query.
+
+The caller is responsible for prepending the term prefix and a
+colon.  This performs minimal escaping in order to produce
+user-friendly queries."
+
+  (save-match-data
+    (if (or (equal term "")
+	    (string-match "[ ()]\\|^\"" term))
+	;; Requires escaping
+	(concat "\"" (replace-regexp-in-string "\"" "\"\"" term t t) "\"")
+      term)))
+
 (defun notmuch-id-to-query (id)
   "Return a query that matches the message with id ID."
-  (concat "id:\"" (replace-regexp-in-string "\"" "\"\"" id t t) "\""))
+  (concat "id:" (notmuch-escape-boolean-term id)))
 
 ;;
 
 (defun notmuch-common-do-stash (text)
   "Common function to stash text in kill ring, and display in minibuffer."
-  (kill-new text)
-  (message "Stashed: %s" text))
+  (if text
+      (progn
+	(kill-new text)
+	(message "Stashed: %s" text))
+    ;; There is nothing to stash so stash an empty string so the user
+    ;; doesn't accidentally paste something else somewhere.
+    (kill-new "")
+    (message "Nothing to stash!")))
 
 ;;
 
@@ -182,19 +212,6 @@ the user hasn't set this variable with the old or new value."
         (push (car list) out))
       (setq list (cdr list)))
     (nreverse out)))
-
-;; This lets us avoid compiling these replacement functions when emacs
-;; is sufficiently new enough to supply them alone. We do the macro
-;; treatment rather than just wrapping our defun calls in a when form
-;; specifically so that the compiler never sees the code on new emacs,
-;; (since the code is triggering warnings that we don't know how to get
-;; rid of.
-;;
-;; A more clever macro here would accept a condition and a list of forms.
-(defmacro compile-on-emacs-prior-to-23 (form)
-  "Conditionally evaluate form only on emacs < emacs-23."
-  (list 'when (< emacs-major-version 23)
-	form))
 
 (defun notmuch-split-content-type (content-type)
   "Split content/type into 'content' and 'type'"
@@ -296,43 +313,242 @@ current buffer, if possible."
   (loop for (key value . rest) on plist by #'cddr
 	collect (cons (intern (substring (symbol-name key) 1)) value)))
 
-(defun notmuch-combine-face-text-property (start end face)
+(defun notmuch-face-ensure-list-form (face)
+  "Return FACE in face list form.
+
+If FACE is already a face list, it will be returned as-is.  If
+FACE is a face name or face plist, it will be returned as a
+single element face list."
+  (if (and (listp face) (not (keywordp (car face))))
+      face
+    (list face)))
+
+(defun notmuch-combine-face-text-property (start end face &optional below object)
   "Combine FACE into the 'face text property between START and END.
 
 This function combines FACE with any existing faces between START
-and END.  Attributes specified by FACE take precedence over
-existing attributes.  FACE must be a face name (a symbol or
-string), a property list of face attributes, or a list of these."
+and END in OBJECT (which defaults to the current buffer).
+Attributes specified by FACE take precedence over existing
+attributes unless BELOW is non-nil.  FACE must be a face name (a
+symbol or string), a property list of face attributes, or a list
+of these.  For convenience when applied to strings, this returns
+OBJECT."
 
-  (let ((pos start))
+  ;; A face property can have three forms: a face name (a string or
+  ;; symbol), a property list, or a list of these two forms.  In the
+  ;; list case, the faces will be combined, with the earlier faces
+  ;; taking precedent.  Here we canonicalize everything to list form
+  ;; to make it easy to combine.
+  (let ((pos start)
+	(face-list (notmuch-face-ensure-list-form face)))
     (while (< pos end)
-      (let ((cur (get-text-property pos 'face))
-	    (next (next-single-property-change pos 'face nil end)))
-	(put-text-property pos next 'face (cons face cur))
-	(setq pos next)))))
+      (let* ((cur (get-text-property pos 'face object))
+	     (cur-list (notmuch-face-ensure-list-form cur))
+	     (new (cond ((null cur-list) face)
+			(below (append cur-list face-list))
+			(t (append face-list cur-list))))
+	     (next (next-single-property-change pos 'face object end)))
+	(put-text-property pos next 'face new object)
+	(setq pos next))))
+  object)
 
-;; Compatibility functions for versions of emacs before emacs 23.
-;;
-;; Both functions here were copied from emacs 23 with the following copyright:
-;;
-;; Copyright (C) 1985, 1986, 1992, 1994, 1995, 1999, 2000, 2001, 2002, 2003,
-;;   2004, 2005, 2006, 2007, 2008, 2009, 2010 Free Software Foundation, Inc.
-;;
-;; and under the GPL version 3 (or later) exactly as notmuch itself.
-(compile-on-emacs-prior-to-23
- (defun apply-partially (fun &rest args)
-   "Return a function that is a partial application of FUN to ARGS.
-ARGS is a list of the first N arguments to pass to FUN.
-The result is a new function which does the same as FUN, except that
-the first N arguments are fixed at the values with which this function
-was called."
-   (lexical-let ((fun fun) (args1 args))
-     (lambda (&rest args2) (apply fun (append args1 args2))))))
+(defun notmuch-combine-face-text-property-string (string face &optional below)
+  (notmuch-combine-face-text-property
+   0
+   (length string)
+   face
+   below
+   string))
 
-(compile-on-emacs-prior-to-23
- (defun mouse-event-p (object)
-   "Return non-nil if OBJECT is a mouse click event."
-   (memq (event-basic-type object) '(mouse-1 mouse-2 mouse-3 mouse-movement))))
+(defun notmuch-map-text-property (start end prop func &optional object)
+  "Transform text property PROP using FUNC.
+
+Applies FUNC to each distinct value of the text property PROP
+between START and END of OBJECT, setting PROP to the value
+returned by FUNC."
+  (while (< start end)
+    (let ((value (get-text-property start prop object))
+	  (next (next-single-property-change start prop object end)))
+      (put-text-property start next prop (funcall func value) object)
+      (setq start next))))
+
+(defun notmuch-logged-error (msg &optional extra)
+  "Log MSG and EXTRA to *Notmuch errors* and signal MSG.
+
+This logs MSG and EXTRA to the *Notmuch errors* buffer and
+signals MSG as an error.  If EXTRA is non-nil, text referring the
+user to the *Notmuch errors* buffer will be appended to the
+signaled error.  This function does not return."
+
+  (with-current-buffer (get-buffer-create "*Notmuch errors*")
+    (goto-char (point-max))
+    (unless (bobp)
+      (newline))
+    (save-excursion
+      (insert "[" (current-time-string) "]\n" msg)
+      (unless (bolp)
+	(newline))
+      (when extra
+	(insert extra)
+	(unless (bolp)
+	  (newline)))))
+  (error "%s" (concat msg (when extra
+			    " (see *Notmuch errors* for more details)"))))
+
+(defun notmuch-check-async-exit-status (proc msg &optional command err-file)
+  "If PROC exited abnormally, pop up an error buffer and signal an error.
+
+This is a wrapper around `notmuch-check-exit-status' for
+asynchronous process sentinels.  PROC and MSG must be the
+arguments passed to the sentinel.  COMMAND and ERR-FILE, if
+provided, are passed to `notmuch-check-exit-status'.  If COMMAND
+is not provided, it is taken from `process-command'."
+  (let ((exit-status
+	 (case (process-status proc)
+	   ((exit) (process-exit-status proc))
+	   ((signal) msg))))
+    (when exit-status
+      (notmuch-check-exit-status exit-status (or command (process-command proc))
+				 nil err-file))))
+
+(defun notmuch-check-exit-status (exit-status command &optional output err-file)
+  "If EXIT-STATUS is non-zero, pop up an error buffer and signal an error.
+
+If EXIT-STATUS is non-zero, pop up a notmuch error buffer
+describing the error and signal an Elisp error.  EXIT-STATUS must
+be a number indicating the exit status code of a process or a
+string describing the signal that terminated the process (such as
+returned by `call-process').  COMMAND must be a list giving the
+command and its arguments.  OUTPUT, if provided, is a string
+giving the output of command.  ERR-FILE, if provided, is the name
+of a file containing the error output of command.  OUTPUT and the
+contents of ERR-FILE will be included in the error message."
+
+  (cond
+   ((eq exit-status 0) t)
+   ((eq exit-status 20)
+    (notmuch-logged-error "notmuch CLI version mismatch
+Emacs requested an older output format than supported by the notmuch CLI.
+You may need to restart Emacs or upgrade your notmuch Emacs package."))
+   ((eq exit-status 21)
+    (notmuch-logged-error "notmuch CLI version mismatch
+Emacs requested a newer output format than supported by the notmuch CLI.
+You may need to restart Emacs or upgrade your notmuch package."))
+   (t
+    (let* ((err (when err-file
+		  (with-temp-buffer
+		    (insert-file-contents err-file)
+		    (unless (eobp)
+		      (buffer-string)))))
+	   (extra
+	    (concat
+	     "command: " (mapconcat #'shell-quote-argument command " ") "\n"
+	     (if (integerp exit-status)
+		 (format "exit status: %s\n" exit-status)
+	       (format "exit signal: %s\n" exit-status))
+	     (when err
+	       (concat "stderr:\n" err))
+	     (when output
+	       (concat "stdout:\n" output)))))
+	(if err
+	    ;; We have an error message straight from the CLI.
+	    (notmuch-logged-error
+	     (replace-regexp-in-string "[ \n\r\t\f]*\\'" "" err) extra)
+	  ;; We only have combined output from the CLI; don't inundate
+	  ;; the user with it.  Mimic `process-lines'.
+	  (notmuch-logged-error (format "%s exited with status %s"
+					(car command) exit-status)
+				extra))
+	;; `notmuch-logged-error' does not return.
+	))))
+
+(defun notmuch-call-notmuch-json (&rest args)
+  "Invoke `notmuch-command' with ARGS and return the parsed JSON output.
+
+The returned output will represent objects using property lists
+and arrays as lists.  If notmuch exits with a non-zero status,
+this will pop up a buffer containing notmuch's output and signal
+an error."
+
+  (with-temp-buffer
+    (let ((err-file (make-temp-file "nmerr")))
+      (unwind-protect
+	  (let ((status (apply #'call-process
+			       notmuch-command nil (list t err-file) nil args)))
+	    (notmuch-check-exit-status status (cons notmuch-command args)
+				       (buffer-string) err-file)
+	    (goto-char (point-min))
+	    (let ((json-object-type 'plist)
+		  (json-array-type 'list)
+		  (json-false 'nil))
+	      (json-read)))
+	(delete-file err-file)))))
+
+(defun notmuch-start-notmuch (name buffer sentinel &rest args)
+  "Start and return an asynchronous notmuch command.
+
+This starts and returns an asynchronous process running
+`notmuch-command' with ARGS.  The exit status is checked via
+`notmuch-check-async-exit-status'.  Output written to stderr is
+redirected and displayed when the process exits (even if the
+process exits successfully).  NAME and BUFFER are the same as in
+`start-process'.  SENTINEL is a process sentinel function to call
+when the process exits, or nil for none.  The caller must *not*
+invoke `set-process-sentinel' directly on the returned process,
+as that will interfere with the handling of stderr and the exit
+status."
+
+  ;; There is no way (as of Emacs 24.3) to capture stdout and stderr
+  ;; separately for asynchronous processes, or even to redirect stderr
+  ;; to a file, so we use a trivial shell wrapper to send stderr to a
+  ;; temporary file and clean things up in the sentinel.
+  (let* ((err-file (make-temp-file "nmerr"))
+	 ;; Use a pipe
+	 (process-connection-type nil)
+	 ;; Find notmuch using Emacs' `exec-path'
+	 (command (or (executable-find notmuch-command)
+		      (error "command not found: %s" notmuch-command)))
+	 (proc (apply #'start-process name buffer
+		      "/bin/sh" "-c"
+		      "exec 2>\"$1\"; shift; exec \"$0\" \"$@\""
+		      command err-file args)))
+    (process-put proc 'err-file err-file)
+    (process-put proc 'sub-sentinel sentinel)
+    (process-put proc 'real-command (cons notmuch-command args))
+    (set-process-sentinel proc #'notmuch-start-notmuch-sentinel)
+    proc))
+
+(defun notmuch-start-notmuch-sentinel (proc event)
+  (let ((err-file (process-get proc 'err-file))
+	(sub-sentinel (process-get proc 'sub-sentinel))
+	(real-command (process-get proc 'real-command)))
+    (condition-case err
+	(progn
+	  ;; Invoke the sub-sentinel, if any
+	  (when sub-sentinel
+	    (funcall sub-sentinel proc event))
+	  ;; Check the exit status.  This will signal an error if the
+	  ;; exit status is non-zero.
+	  (notmuch-check-async-exit-status proc event real-command err-file)
+	  ;; If that didn't signal an error, then any error output was
+	  ;; really warning output.  Show warnings, if any.
+	  (let ((warnings
+		 (with-temp-buffer
+		   (unless (= (second (insert-file-contents err-file)) 0)
+		     (end-of-line)
+		     ;; Show first line; stuff remaining lines in the
+		     ;; errors buffer.
+		     (let ((l1 (buffer-substring (point-min) (point))))
+		       (skip-chars-forward "\n")
+		       (cons l1 (unless (eobp)
+				  (buffer-substring (point) (point-max)))))))))
+	    (when warnings
+	      (notmuch-logged-error (car warnings) (cdr warnings)))))
+      (error
+       ;; Emacs behaves strangely if an error escapes from a sentinel,
+       ;; so turn errors into messages.
+       (message "%s" (error-message-string err))))
+    (ignore-errors (delete-file err-file))))
 
 ;; This variable is used only buffer local, but it needs to be
 ;; declared globally first to avoid compiler warnings.
@@ -340,6 +556,16 @@ was called."
 (make-variable-buffer-local 'notmuch-show-process-crypto)
 
 ;; Incremental JSON parsing
+
+;; These two variables are internal variables to the parsing
+;; routines. They are always used buffer local but need to be declared
+;; globally to avoid compiler warnings.
+
+(defvar notmuch-json-parser nil
+  "Internal incremental JSON parser object: local to the buffer being parsed.")
+
+(defvar notmuch-json-state nil
+  "State of the internal JSON parser: local to the buffer being parsed.")
 
 (defun notmuch-json-create-parser (buffer)
   "Return a streaming JSON parser that consumes input from BUFFER.
@@ -450,15 +676,19 @@ Entering JSON objects is currently unimplemented."
   (with-current-buffer (notmuch-json-buffer jp)
     ;; Disallow terminators
     (setf (notmuch-json-allow-term jp) nil)
-    (or (notmuch-json-scan-to-value jp)
-	(if (/= (char-after) ?\[)
-	    (signal 'json-readtable-error (list "expected '['"))
-	  (forward-char)
-	  (push ?\] (notmuch-json-term-stack jp))
-	  ;; Expect a value or terminator next
-	  (setf (notmuch-json-next jp) 'expect-value
-		(notmuch-json-allow-term jp) t)
-	  t))))
+    ;; Save "next" so we can restore it if there's a syntax error
+    (let ((saved-next (notmuch-json-next jp)))
+      (or (notmuch-json-scan-to-value jp)
+	  (if (/= (char-after) ?\[)
+	      (progn
+		(setf (notmuch-json-next jp) saved-next)
+		(signal 'json-readtable-error (list "expected '['")))
+	    (forward-char)
+	    (push ?\] (notmuch-json-term-stack jp))
+	    ;; Expect a value or terminator next
+	    (setf (notmuch-json-next jp) 'expect-value
+		  (notmuch-json-allow-term jp) t)
+	    t)))))
 
 (defun notmuch-json-read (jp)
   "Parse the value at point in JP's buffer.
@@ -534,6 +764,62 @@ of the buffer if there is only trailing whitespace."
     (skip-chars-forward " \t\r\n")
     (unless (eobp)
       (signal 'json-error (list "Trailing garbage following JSON data")))))
+
+(defun notmuch-json-parse-partial-list (result-function error-function results-buf)
+  "Parse a partial JSON list from current buffer.
+
+This function consumes a JSON list from the current buffer,
+applying RESULT-FUNCTION in buffer RESULT-BUFFER to each complete
+value in the list.  It operates incrementally and should be
+called whenever the buffer has been extended with additional
+data.
+
+If there is a syntax error, this will attempt to resynchronize
+with the input and will apply ERROR-FUNCTION in buffer
+RESULT-BUFFER to any input that was skipped.
+
+It sets up all the needed internal variables: the caller just
+needs to call it with point in the same place that the parser
+left it."
+  (let (done)
+    (unless (local-variable-p 'notmuch-json-parser)
+      (set (make-local-variable 'notmuch-json-parser)
+	   (notmuch-json-create-parser (current-buffer)))
+      (set (make-local-variable 'notmuch-json-state) 'begin))
+    (while (not done)
+      (condition-case nil
+	  (case notmuch-json-state
+		((begin)
+		 ;; Enter the results list
+		 (if (eq (notmuch-json-begin-compound
+			  notmuch-json-parser) 'retry)
+		     (setq done t)
+		   (setq notmuch-json-state 'result)))
+		((result)
+		 ;; Parse a result
+		 (let ((result (notmuch-json-read notmuch-json-parser)))
+		   (case result
+			 ((retry) (setq done t))
+			 ((end) (setq notmuch-json-state 'end))
+			 (otherwise (with-current-buffer results-buf
+				      (funcall result-function result))))))
+		((end)
+		 ;; Any trailing data is unexpected
+		 (notmuch-json-eof notmuch-json-parser)
+		 (setq done t)))
+	(json-error
+	 ;; Do our best to resynchronize and ensure forward
+	 ;; progress
+	 (let ((bad (buffer-substring (line-beginning-position)
+				      (line-end-position))))
+	   (forward-line)
+	   (with-current-buffer results-buf
+	     (funcall error-function "%s" bad))))))
+    ;; Clear out what we've parsed
+    (delete-region (point-min) (point))))
+
+
+
 
 (provide 'notmuch-lib)
 

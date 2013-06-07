@@ -26,7 +26,7 @@
 (require 'notmuch-lib)
 (require 'notmuch-mua)
 
-(declare-function notmuch-search "notmuch" (query &optional oldest-first target-thread target-line continuation))
+(declare-function notmuch-search "notmuch" (&optional query oldest-first target-thread target-line continuation))
 (declare-function notmuch-poll "notmuch" ())
 
 (defcustom notmuch-hello-recent-searches-max 10
@@ -381,26 +381,38 @@ The result is the list of elements of the form (NAME QUERY COUNT).
 The values :show-empty-searches, :filter and :filter-count from
 options will be handled as specified for
 `notmuch-hello-insert-searches'."
-  (notmuch-remove-if-not
-   #'identity
-   (mapcar
-    (lambda (elem)
-      (let* ((name (car elem))
-	     (query-and-count (if (consp (cdr elem))
-				  ;; do we have a different query for the message count?
-				  (cons (second elem) (third elem))
-				(cons (cdr elem) (cdr elem))))
-	     (message-count
-	      (string-to-number
-	       (notmuch-saved-search-count
-		(notmuch-hello-filtered-query (cdr query-and-count)
-					      (or (plist-get options :filter-count)
-						 (plist-get options :filter)))))))
-	(and (or (plist-get options :show-empty-searches) (> message-count 0))
-	     (list name (notmuch-hello-filtered-query
-			 (car query-and-count) (plist-get options :filter))
-		   message-count))))
-    query-alist)))
+  (with-temp-buffer
+    (dolist (elem query-alist nil)
+      (let ((count-query (if (consp (cdr elem))
+			     ;; do we have a different query for the message count?
+			     (third elem)
+			   (cdr elem))))
+	(insert
+	 (notmuch-hello-filtered-query count-query
+				       (or (plist-get options :filter-count)
+					   (plist-get options :filter)))
+	 "\n")))
+
+    (call-process-region (point-min) (point-max) notmuch-command
+			 t t nil "count" "--batch")
+    (goto-char (point-min))
+
+    (notmuch-remove-if-not
+     #'identity
+     (mapcar
+      (lambda (elem)
+	(let ((name (car elem))
+	      (search-query (if (consp (cdr elem))
+				 ;; do we have a different query for the message count?
+				 (second elem)
+			      (cdr elem)))
+	      (message-count (prog1 (read (current-buffer))
+				(forward-line 1))))
+	  (and (or (plist-get options :show-empty-searches) (> message-count 0))
+	       (list name (notmuch-hello-filtered-query
+			   search-query (plist-get options :filter))
+		     message-count))))
+      query-alist))))
 
 (defun notmuch-hello-insert-buttons (searches)
   "Insert buttons for SEARCHES.
@@ -500,11 +512,11 @@ Complete list of currently available key bindings:
 (defun notmuch-hello-generate-tag-alist (&optional hide-tags)
   "Return an alist from tags to queries to display in the all-tags section."
   (mapcar (lambda (tag)
-	    (cons tag (format "tag:%s" tag)))
+	    (cons tag (concat "tag:" (notmuch-escape-boolean-term tag))))
 	  (notmuch-remove-if-not
 	   (lambda (tag)
 	     (not (member tag hide-tags)))
-	   (process-lines notmuch-command "search-tags"))))
+	   (process-lines notmuch-command "search" "--output=tags" "*"))))
 
 (defun notmuch-hello-insert-header ()
   "Insert the default notmuch-hello header."
@@ -689,7 +701,7 @@ following:
   "Show an entry for each saved search and inboxed messages for each tag"
   (notmuch-hello-insert-searches "What's in your inbox"
 				 (append
-				  (notmuch-saved-searches)
+				  notmuch-saved-searches
 				  (notmuch-hello-generate-tag-alist))
 				 :filter "tag:inbox"))
 
@@ -725,11 +737,6 @@ following:
 (defun notmuch-hello (&optional no-display)
   "Run notmuch and display saved searches, known tags, etc."
   (interactive)
-
-  ;; Jump through a hoop to get this value from the deprecated variable
-  ;; name (`notmuch-folders') or from the default value.
-  (unless notmuch-saved-searches
-    (setq notmuch-saved-searches (notmuch-saved-searches)))
 
   (if no-display
       (set-buffer "*notmuch-hello*")

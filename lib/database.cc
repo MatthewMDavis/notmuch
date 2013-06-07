@@ -19,6 +19,7 @@
  */
 
 #include "database-private.h"
+#include "parse-time-vrp.h"
 
 #include <iostream>
 
@@ -500,8 +501,10 @@ _parse_message_id (void *ctx, const char *message_id, const char **next)
  * 'message_id' in the result (to avoid mass confusion when a single
  * message references itself cyclically---and yes, mail messages are
  * not infrequent in the wild that do this---don't ask me why).
-*/
-static void
+ *
+ * Return the last reference parsed, if it is not equal to message_id.
+ */
+static char *
 parse_references (void *ctx,
 		  const char *message_id,
 		  GHashTable *hash,
@@ -510,13 +513,24 @@ parse_references (void *ctx,
     char *ref;
 
     if (refs == NULL || *refs == '\0')
-	return;
+	return NULL;
 
     while (*refs) {
 	ref = _parse_message_id (ctx, refs, &refs);
 
 	if (ref && strcmp (ref, message_id))
 	    g_hash_table_insert (hash, ref, NULL);
+    }
+
+    /* The return value of this function is used to add a parent
+     * reference to the database.  We should avoid making a message
+     * its own parent, thus the following check.
+     */
+
+    if (ref && strcmp(ref, message_id)) {
+	return ref;
+    } else {
+	return NULL;
     }
 }
 
@@ -710,12 +724,14 @@ notmuch_database_open (const char *path,
 	notmuch->term_gen = new Xapian::TermGenerator;
 	notmuch->term_gen->set_stemmer (Xapian::Stem ("english"));
 	notmuch->value_range_processor = new Xapian::NumberValueRangeProcessor (NOTMUCH_VALUE_TIMESTAMP);
+	notmuch->date_range_processor = new ParseTimeValueRangeProcessor (NOTMUCH_VALUE_TIMESTAMP);
 
 	notmuch->query_parser->set_default_op (Xapian::Query::OP_AND);
 	notmuch->query_parser->set_database (*notmuch->xapian_db);
 	notmuch->query_parser->set_stemmer (Xapian::Stem ("english"));
 	notmuch->query_parser->set_stemming_strategy (Xapian::QueryParser::STEM_SOME);
 	notmuch->query_parser->add_valuerangeprocessor (notmuch->value_range_processor);
+	notmuch->query_parser->add_valuerangeprocessor (notmuch->date_range_processor);
 
 	for (i = 0; i < ARRAY_SIZE (BOOLEAN_PREFIX_EXTERNAL); i++) {
 	    prefix_t *prefix = &BOOLEAN_PREFIX_EXTERNAL[i];
@@ -778,6 +794,8 @@ notmuch_database_close (notmuch_database_t *notmuch)
     notmuch->xapian_db = NULL;
     delete notmuch->value_range_processor;
     notmuch->value_range_processor = NULL;
+    delete notmuch->date_range_processor;
+    notmuch->date_range_processor = NULL;
 }
 
 void
@@ -1505,28 +1523,33 @@ _notmuch_database_link_message_to_parents (notmuch_database_t *notmuch,
 {
     GHashTable *parents = NULL;
     const char *refs, *in_reply_to, *in_reply_to_message_id;
+    const char *last_ref_message_id, *this_message_id;
     GList *l, *keys = NULL;
     notmuch_status_t ret = NOTMUCH_STATUS_SUCCESS;
 
     parents = g_hash_table_new_full (g_str_hash, g_str_equal,
 				     _my_talloc_free_for_g_hash, NULL);
+    this_message_id = notmuch_message_get_message_id (message);
 
     refs = notmuch_message_file_get_header (message_file, "references");
-    parse_references (message, notmuch_message_get_message_id (message),
-		      parents, refs);
+    last_ref_message_id = parse_references (message,
+					    this_message_id,
+					    parents, refs);
 
     in_reply_to = notmuch_message_file_get_header (message_file, "in-reply-to");
-    parse_references (message, notmuch_message_get_message_id (message),
-		      parents, in_reply_to);
+    in_reply_to_message_id = parse_references (message,
+					       this_message_id,
+					       parents, in_reply_to);
 
-    /* Carefully avoid adding any self-referential in-reply-to term. */
-    in_reply_to_message_id = _parse_message_id (message, in_reply_to, NULL);
-    if (in_reply_to_message_id &&
-	strcmp (in_reply_to_message_id,
-		notmuch_message_get_message_id (message)))
-    {
+    /* For the parent of this message, use the last message ID of the
+     * References header, if available.  If not, fall back to the
+     * first message ID in the In-Reply-To header. */
+    if (last_ref_message_id) {
+        _notmuch_message_add_term (message, "replyto",
+                                   last_ref_message_id);
+    } else if (in_reply_to_message_id) {
 	_notmuch_message_add_term (message, "replyto",
-			     _parse_message_id (message, in_reply_to, NULL));
+			     in_reply_to_message_id);
     }
 
     keys = g_hash_table_get_keys (parents);
@@ -1816,7 +1839,9 @@ notmuch_database_add_message (notmuch_database_t *notmuch,
 	    date = notmuch_message_file_get_header (message_file, "date");
 	    _notmuch_message_set_header_values (message, date, from, subject);
 
-	    _notmuch_message_index_file (message, filename);
+	    ret = _notmuch_message_index_file (message, filename);
+	    if (ret)
+		goto DONE;
 	} else {
 	    ret = NOTMUCH_STATUS_DUPLICATE_MESSAGE_ID;
 	}

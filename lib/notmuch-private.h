@@ -236,6 +236,7 @@ _notmuch_thread_create (void *ctx,
 			unsigned int seed_doc_id,
 			notmuch_doc_id_set_t *match_set,
 			notmuch_string_list_t *excluded_terms,
+			notmuch_exclude_t omit_exclude,
 			notmuch_sort_t sort);
 
 /* message.cc */
@@ -429,10 +430,6 @@ notmuch_message_list_t *
 _notmuch_message_list_create (const void *ctx);
 
 void
-_notmuch_message_list_append (notmuch_message_list_t *list,
-			      notmuch_message_node_t *node);
-
-void
 _notmuch_message_list_add_message (notmuch_message_list_t *list,
 				   notmuch_message_t *message);
 
@@ -462,7 +459,7 @@ _notmuch_doc_id_set_remove (notmuch_doc_id_set_t *doc_ids,
 
 void
 _notmuch_message_add_reply (notmuch_message_t *message,
-			    notmuch_message_node_t *reply);
+			    notmuch_message_t *reply);
 
 /* sha1.c */
 

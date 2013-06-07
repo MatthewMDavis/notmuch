@@ -121,7 +121,8 @@ sub prompt($$) {
 
 sub get_message_id() {
     my $mail = Mail::Internet->new(\*STDIN);
-    $mail->head->get("message-id") =~ /^<(.*)>$/;	# get message-id
+    my $mid = $mail->head->get("message-id") or return undef;
+    $mid =~ /^<(.*)>$/;	# get message-id value
     return $1;
 }
 
@@ -142,6 +143,10 @@ sub thread_action($$@) {
     my ($results_dir, $remove_dups, @params) = @_;
 
     my $mid = get_message_id();
+    if (! defined $mid) {
+	empty_maildir($results_dir);
+	die "notmuch-mutt: cannot find Message-Id, abort.\n";
+    }
     my $search_cmd = 'notmuch search --output=threads ' . shell_quote("id:$mid");
     my $tid = `$search_cmd`;	# get thread id
     chomp($tid);
@@ -151,6 +156,7 @@ sub thread_action($$@) {
 
 sub tag_action(@) {
     my $mid = get_message_id();
+    defined $mid or die "notmuch-mutt: cannot find Message-Id, abort.\n";
 
     system("notmuch tag "
 	   . shell_quote(join(' ', @_))
@@ -264,13 +270,23 @@ the following in your Mutt configuration (usually one of: F<~/.muttrc>,
 F</etc/Muttrc>, or a configuration snippet under F</etc/Muttrc.d/>):
 
     macro index <F8> \
-          "<enter-command>unset wait_key<enter><shell-escape>notmuch-mutt -r --prompt search<enter><change-folder-readonly>~/.cache/notmuch/mutt/results<enter>" \
+    "<enter-command>set my_old_pipe_decode=\$pipe_decode my_old_wait_key=\$wait_key nopipe_decode nowait_key<enter>\
+    <shell-escape>notmuch-mutt -r --prompt search<enter>\
+    <change-folder-readonly>`echo ${XDG_CACHE_HOME:-$HOME/.cache}/notmuch/mutt/results`<enter>\
+    <enter-command>set pipe_decode=\$my_old_pipe_decode wait_key=\$my_old_wait_key<enter>" \
           "notmuch: search mail"
+
     macro index <F9> \
-          "<enter-command>unset wait_key<enter><pipe-message>notmuch-mutt -r thread<enter><change-folder-readonly>~/.cache/notmuch/mutt/results<enter><enter-command>set wait_key<enter>" \
+    "<enter-command>set my_old_pipe_decode=\$pipe_decode my_old_wait_key=\$wait_key nopipe_decode nowait_key<enter>\
+    <pipe-message>notmuch-mutt -r thread<enter>\
+    <change-folder-readonly>`echo ${XDG_CACHE_HOME:-$HOME/.cache}/notmuch/mutt/results`<enter>\
+    <enter-command>set pipe_decode=\$my_old_pipe_decode wait_key=\$my_old_wait_key<enter>" \
           "notmuch: reconstruct thread"
+
     macro index <F6> \
-          "<enter-command>unset wait_key<enter><pipe-message>notmuch-mutt tag -- -inbox<enter>" \
+    "<enter-command>set my_old_pipe_decode=\$pipe_decode my_old_wait_key=\$wait_key nopipe_decode nowait_key<enter>\
+    <pipe-message>notmuch-mutt tag -- -inbox<enter>\
+    <enter-command>set pipe_decode=\$my_old_pipe_decode wait_key=\$my_old_wait_key<enter>" \
           "notmuch: remove message from inbox"
 
 The first macro (activated by <F8>) prompts the user for notmuch search terms

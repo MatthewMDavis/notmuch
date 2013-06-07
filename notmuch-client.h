@@ -54,11 +54,12 @@ typedef GMimeCipherContext notmuch_crypto_context_t;
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <unistd.h>
+#include <fcntl.h>
 #include <dirent.h>
 #include <errno.h>
 #include <signal.h>
 
-#include <talloc.h>
+#include "talloc-extra.h"
 
 #define unused(x) x __attribute__ ((unused))
 
@@ -117,6 +118,53 @@ chomp_newline (char *str)
 	str[strlen(str)-1] = '\0';
 }
 
+/* Exit status code indicating the requested format version is too old
+ * (support for that version has been dropped).  CLI code should use
+ * notmuch_exit_if_unsupported_format rather than directly exiting
+ * with this code.
+ */
+#define NOTMUCH_EXIT_FORMAT_TOO_OLD 20
+/* Exit status code indicating the requested format version is newer
+ * than the version supported by the CLI.  CLI code should use
+ * notmuch_exit_if_unsupported_format rather than directly exiting
+ * with this code.
+ */
+#define NOTMUCH_EXIT_FORMAT_TOO_NEW 21
+
+/* The current structured output format version.  Requests for format
+ * versions above this will return an error.  Backwards-incompatible
+ * changes such as removing map fields, changing the meaning of map
+ * fields, or changing the meanings of list elements should increase
+ * this.  New (required) map fields can be added without increasing
+ * this.
+ */
+#define NOTMUCH_FORMAT_CUR 1
+/* The minimum supported structured output format version.  Requests
+ * for format versions below this will return an error. */
+#define NOTMUCH_FORMAT_MIN 1
+
+/* The output format version requested by the caller on the command
+ * line.  If no format version is requested, this will be set to
+ * NOTMUCH_FORMAT_CUR.  Even though the command-line option is
+ * per-command, this is global because commands can share structured
+ * output code.
+ */
+extern int notmuch_format_version;
+
+typedef struct _notmuch_config notmuch_config_t;
+
+/* Commands that support structured output should support the
+ * following argument
+ *  { NOTMUCH_OPT_INT, &notmuch_format_version, "format-version", 0, 0 }
+ * and should invoke notmuch_exit_if_unsupported_format to check the
+ * requested version.  If notmuch_format_version is outside the
+ * supported range, this will print a detailed diagnostic message for
+ * the user and exit with NOTMUCH_EXIT_FORMAT_TOO_{OLD,NEW} to inform
+ * the invoking program of the problem.
+ */
+void
+notmuch_exit_if_unsupported_format (void);
+
 notmuch_crypto_context_t *
 notmuch_crypto_get_context (notmuch_crypto_t *crypto, const char *protocol);
 
@@ -124,40 +172,34 @@ int
 notmuch_crypto_cleanup (notmuch_crypto_t *crypto);
 
 int
-notmuch_count_command (void *ctx, int argc, char *argv[]);
+notmuch_count_command (notmuch_config_t *config, int argc, char *argv[]);
 
 int
-notmuch_dump_command (void *ctx, int argc, char *argv[]);
+notmuch_dump_command (notmuch_config_t *config, int argc, char *argv[]);
 
 int
-notmuch_new_command (void *ctx, int argc, char *argv[]);
+notmuch_new_command (notmuch_config_t *config, int argc, char *argv[]);
 
 int
-notmuch_reply_command (void *ctx, int argc, char *argv[]);
+notmuch_reply_command (notmuch_config_t *config, int argc, char *argv[]);
 
 int
-notmuch_restore_command (void *ctx, int argc, char *argv[]);
+notmuch_restore_command (notmuch_config_t *config, int argc, char *argv[]);
 
 int
-notmuch_search_command (void *ctx, int argc, char *argv[]);
+notmuch_search_command (notmuch_config_t *config, int argc, char *argv[]);
 
 int
-notmuch_setup_command (void *ctx, int argc, char *argv[]);
+notmuch_setup_command (notmuch_config_t *config, int argc, char *argv[]);
 
 int
-notmuch_show_command (void *ctx, int argc, char *argv[]);
+notmuch_show_command (notmuch_config_t *config, int argc, char *argv[]);
 
 int
-notmuch_tag_command (void *ctx, int argc, char *argv[]);
+notmuch_tag_command (notmuch_config_t *config, int argc, char *argv[]);
 
 int
-notmuch_search_tags_command (void *ctx, int argc, char *argv[]);
-
-int
-notmuch_cat_command (void *ctx, int argc, char *argv[]);
-
-int
-notmuch_config_command (void *ctx, int argc, char *argv[]);
+notmuch_config_command (notmuch_config_t *config, int argc, char *argv[]);
 
 const char *
 notmuch_time_relative_date (const void *ctx, time_t then);
@@ -175,12 +217,12 @@ notmuch_status_t
 show_one_part (const char *filename, int part);
 
 void
-format_part_json (const void *ctx, struct sprinter *sp, mime_node_t *node,
-		  notmuch_bool_t first, notmuch_bool_t output_body);
+format_part_sprinter (const void *ctx, struct sprinter *sp, mime_node_t *node,
+		      notmuch_bool_t first, notmuch_bool_t output_body);
 
 void
-format_headers_json (struct sprinter *sp, GMimeMessage *message,
-		     notmuch_bool_t reply);
+format_headers_sprinter (struct sprinter *sp, GMimeMessage *message,
+			 notmuch_bool_t reply);
 
 typedef enum {
     NOTMUCH_SHOW_TEXT_PART_REPLY = 1 << 0,
@@ -198,18 +240,19 @@ json_quote_str (const void *ctx, const char *str);
 
 /* notmuch-config.c */
 
-typedef struct _notmuch_config notmuch_config_t;
-
 notmuch_config_t *
 notmuch_config_open (void *ctx,
 		     const char *filename,
-		     notmuch_bool_t *is_new_ret);
+		     notmuch_bool_t create_new);
 
 void
 notmuch_config_close (notmuch_config_t *config);
 
 int
 notmuch_config_save (notmuch_config_t *config);
+
+notmuch_bool_t
+notmuch_config_is_new (notmuch_config_t *config);
 
 const char *
 notmuch_config_get_database_path (notmuch_config_t *config);

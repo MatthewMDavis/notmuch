@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 test_description="emacs notmuch-show view"
-. test-lib.sh
+. ./test-lib.sh
 
 EXPECTED=$TEST_DIRECTORY/emacs-show.expected-output
 
@@ -105,6 +105,96 @@ test_emacs '(notmuch-search "from:lars@seas.harvard.edu and subject:\"Maildir st
 	(notmuch-show-toggle-thread-indentation)
 	(test-visible-output)'
 test_expect_equal_file OUTPUT $EXPECTED/notmuch-show-indent-thread-content-off
+
+test_begin_subtest "id buttonization"
+add_message '[body]="
+id:abc
+id:abc.def. id:abc,def, id:abc;def; id:abc:def:
+id:foo@bar.?baz? id:foo@bar!.baz!
+(id:foo@bar.baz) [id:foo@bar.baz]
+id:foo@bar.baz...
+id:2+2=5
+id:=_-:/.[]@$%+
+id:abc)def
+id:ab\"c def
+id:\"abc\"def
+id:\"ab\"\"c\"def
+id:\"ab c\"def
+id:\"abc\".def
+id:\"abc
+\"
+id:)
+id:
+cid:xxx
+mid:abc mid:abc/def
+mid:abc%20def
+mid:abc. mid:abc, mid:abc;"'
+test_emacs '(notmuch-show "id:'$gen_msg_id'")
+	(notmuch-test-mark-links)
+	(test-visible-output)'
+cat <<EOF >EXPECTED
+Notmuch Test Suite <test_suite@notmuchmail.org> (2001-01-05) (inbox)
+Subject: id buttonization
+To: Notmuch Test Suite <test_suite@notmuchmail.org>
+Date: Fri, 05 Jan 2001 15:43:57 +0000
+
+<<id:abc>>
+<<id:abc.def>>. <<id:abc,def>>, <<id:abc;def>>; <<id:abc:def>>:
+<<id:foo@bar.?baz>>? <<id:foo@bar!.baz>>!
+(<<id:foo@bar.baz>>) [<<id:foo@bar.baz>>]
+<<id:foo@bar.baz>>...
+<<id:2+2=5>>
+<<id:=_-:/.[]@$%+>>
+<<id:abc>>)def
+<<id:ab"c>> def
+<<id:"abc">>def
+<<id:"ab""c">>def
+<<id:"ab c">>def
+<<id:"abc">>.def
+id:"abc
+"
+id:)
+id:
+cid:xxx
+<<mid:abc>> <<mid:abc/def>>
+<<mid:abc%20def>>
+<<mid:abc>>. <<mid:abc>>, <<mid:abc>>;
+EOF
+test_expect_equal_file OUTPUT EXPECTED
+
+
+test_begin_subtest "Show handles subprocess errors"
+cat > notmuch_fail <<EOF
+#!/bin/sh
+echo This is output
+echo This is an error >&2
+exit 1
+EOF
+chmod a+x notmuch_fail
+test_emacs "(let ((notmuch-command \"$PWD/notmuch_fail\"))
+	       (with-current-buffer \"*Messages*\" (erase-buffer))
+	       (condition-case err
+		   (notmuch-show \"*\")
+		 (error (message \"%s\" (second err))))
+	       (notmuch-test-wait)
+	       (with-current-buffer \"*Messages*\"
+		  (test-output \"MESSAGES\"))
+	       (with-current-buffer \"*Notmuch errors*\"
+		  (test-output \"ERROR\"))
+	       (test-output))"
+sed -i -e 's/^\[.*\]$/[XXX]/' ERROR
+test_expect_equal "$(cat OUTPUT; echo ---; cat MESSAGES; echo ---; cat ERROR)" "\
+---
+This is an error (see *Notmuch errors* for more details)
+---
+[XXX]
+This is an error
+command: $PWD/notmuch_fail show --format\\=json --format-version\\=1 --exclude\\=false \\' \\* \\'
+exit status: 1
+stderr:
+This is an error
+stdout:
+This is output"
 
 
 test_done

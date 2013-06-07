@@ -32,53 +32,12 @@ enum {
     EXCLUDE_FALSE,
 };
 
-int
-notmuch_count_command (void *ctx, int argc, char *argv[])
+static int
+print_count (notmuch_database_t *notmuch, const char *query_str,
+	     const char **exclude_tags, size_t exclude_tags_length, int output)
 {
-    notmuch_config_t *config;
-    notmuch_database_t *notmuch;
     notmuch_query_t *query;
-    char *query_str;
-    int opt_index;
-    int output = OUTPUT_MESSAGES;
-    int exclude = EXCLUDE_TRUE;
-    unsigned int i;
-
-    notmuch_opt_desc_t options[] = {
-	{ NOTMUCH_OPT_KEYWORD, &output, "output", 'o',
-	  (notmuch_keyword_t []){ { "threads", OUTPUT_THREADS },
-				  { "messages", OUTPUT_MESSAGES },
-				  { 0, 0 } } },
-	{ NOTMUCH_OPT_KEYWORD, &exclude, "exclude", 'x',
-	  (notmuch_keyword_t []){ { "true", EXCLUDE_TRUE },
-				  { "false", EXCLUDE_FALSE },
-				  { 0, 0 } } },
-	{ 0, 0, 0, 0, 0 }
-    };
-
-    opt_index = parse_arguments (argc, argv, options, 1);
-
-    if (opt_index < 0) {
-	return 1;
-    }
-
-    config = notmuch_config_open (ctx, NULL, NULL);
-    if (config == NULL)
-	return 1;
-
-    if (notmuch_database_open (notmuch_config_get_database_path (config),
-			       NOTMUCH_DATABASE_MODE_READ_ONLY, &notmuch))
-	return 1;
-
-    query_str = query_string_from_args (ctx, argc-opt_index, argv+opt_index);
-    if (query_str == NULL) {
-	fprintf (stderr, "Out of memory.\n");
-	return 1;
-    }
-
-    if (*query_str == '\0') {
-	query_str = talloc_strdup (ctx, "");
-    }
+    size_t i;
 
     query = notmuch_query_create (notmuch, query_str);
     if (query == NULL) {
@@ -86,15 +45,8 @@ notmuch_count_command (void *ctx, int argc, char *argv[])
 	return 1;
     }
 
-    if (exclude == EXCLUDE_TRUE) {
-	const char **search_exclude_tags;
-	size_t search_exclude_tags_length;
-
-	search_exclude_tags = notmuch_config_get_search_exclude_tags
-	    (config, &search_exclude_tags_length);
-	for (i = 0; i < search_exclude_tags_length; i++)
-	    notmuch_query_add_tag_exclude (query, search_exclude_tags[i]);
-    }
+    for (i = 0; i < exclude_tags_length; i++)
+	notmuch_query_add_tag_exclude (query, exclude_tags[i]);
 
     switch (output) {
     case OUTPUT_MESSAGES:
@@ -106,7 +58,107 @@ notmuch_count_command (void *ctx, int argc, char *argv[])
     }
 
     notmuch_query_destroy (query);
-    notmuch_database_destroy (notmuch);
 
     return 0;
+}
+
+static int
+count_file (notmuch_database_t *notmuch, FILE *input, const char **exclude_tags,
+	    size_t exclude_tags_length, int output)
+{
+    char *line = NULL;
+    ssize_t line_len;
+    size_t line_size;
+    int ret = 0;
+
+    while (!ret && (line_len = getline (&line, &line_size, input)) != -1) {
+	chomp_newline (line);
+	ret = print_count (notmuch, line, exclude_tags, exclude_tags_length,
+			   output);
+    }
+
+    if (line)
+	free (line);
+
+    return ret;
+}
+
+int
+notmuch_count_command (notmuch_config_t *config, int argc, char *argv[])
+{
+    notmuch_database_t *notmuch;
+    char *query_str;
+    int opt_index;
+    int output = OUTPUT_MESSAGES;
+    int exclude = EXCLUDE_TRUE;
+    const char **search_exclude_tags = NULL;
+    size_t search_exclude_tags_length = 0;
+    notmuch_bool_t batch = FALSE;
+    FILE *input = stdin;
+    char *input_file_name = NULL;
+    int ret;
+
+    notmuch_opt_desc_t options[] = {
+	{ NOTMUCH_OPT_KEYWORD, &output, "output", 'o',
+	  (notmuch_keyword_t []){ { "threads", OUTPUT_THREADS },
+				  { "messages", OUTPUT_MESSAGES },
+				  { 0, 0 } } },
+	{ NOTMUCH_OPT_KEYWORD, &exclude, "exclude", 'x',
+	  (notmuch_keyword_t []){ { "true", EXCLUDE_TRUE },
+				  { "false", EXCLUDE_FALSE },
+				  { 0, 0 } } },
+	{ NOTMUCH_OPT_BOOLEAN, &batch, "batch", 0, 0 },
+	{ NOTMUCH_OPT_STRING, &input_file_name, "input", 'i', 0 },
+	{ 0, 0, 0, 0, 0 }
+    };
+
+    opt_index = parse_arguments (argc, argv, options, 1);
+
+    if (opt_index < 0) {
+	return 1;
+    }
+
+    if (input_file_name) {
+	batch = TRUE;
+	input = fopen (input_file_name, "r");
+	if (input == NULL) {
+	    fprintf (stderr, "Error opening %s for reading: %s\n",
+		     input_file_name, strerror (errno));
+	    return 1;
+	}
+    }
+
+    if (batch && opt_index != argc) {
+	fprintf (stderr, "--batch and query string are not compatible\n");
+	return 1;
+    }
+
+    if (notmuch_database_open (notmuch_config_get_database_path (config),
+			       NOTMUCH_DATABASE_MODE_READ_ONLY, &notmuch))
+	return 1;
+
+    query_str = query_string_from_args (config, argc-opt_index, argv+opt_index);
+    if (query_str == NULL) {
+	fprintf (stderr, "Out of memory.\n");
+	return 1;
+    }
+
+    if (exclude == EXCLUDE_TRUE) {
+	search_exclude_tags = notmuch_config_get_search_exclude_tags
+	    (config, &search_exclude_tags_length);
+    }
+
+    if (batch)
+	ret = count_file (notmuch, input, search_exclude_tags,
+			  search_exclude_tags_length, output);
+    else
+	ret = print_count (notmuch, query_str, search_exclude_tags,
+			   search_exclude_tags_length, output);
+
+    notmuch_database_destroy (notmuch);
+
+    if (input != stdin)
+	fclose (input);
+
+    return ret;
 }

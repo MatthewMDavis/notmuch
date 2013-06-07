@@ -1,86 +1,62 @@
-This directory contains a vim script that allows reading notmuch mail
-through vim.
+== notmuch vim ruby ==
 
-NOTE: this is a work in progress.  Patches welcome. <bart@jukie.net>
+This is a vim plug-in that provides a fully usable mail client interface,
+utilizing the notmuch framework, through it's ruby bindings.
 
-Dependencies:
-    notmuch:
-        Naturally, it expects you have notmuch installed and configured.
+== install ==
 
-    sendmail:
-        To send mail, notmuch.vim uses sendmail as default.  Most modern MTAs
-        provide a compatibility binary, and so should work well.
+Simply run 'make install'. However, check that you have the depencies below.
 
+=== vim +ruby ===
 
-To install:
-        make install
+Make sure your vim version has ruby support: check for +ruby in 'vim --version'
+features.
 
+=== ruby bindings ===
 
-To run:
-        vim -c ':NotMuch'
+Check if you are able to run the following command cleanly:
 
-    from vim:
-        :NotMuch
-        :NotMuch new to:bart@jukie.net 'subject:this is a test'
+ % ruby -e "require 'notmuch'"
 
+If you don't see any errors, it means it's working and you can go to the next
+section.
 
-Buffer types:
-    [notmuch-folders]
-        Folder list, or technically a list of saved searches.
+If it's not, you would need to compile them. Go to the 'bindings/ruby'
+directory in the notmuch source tree.
 
-        Keybindings:
-            <Enter> - show the selected search
-            m       - compose a new message
-            s       - enter search criteria
-            =       - refresh display
+=== mail gem ===
 
-    [notmuch-search]
-        You are presented with the search results when you run :NotMuch.
+Since libnotmuch library concentrates on things other than handling mail, we
+need a library to do that, and for Ruby the best library for that is called
+'mail'. The easiest way to install it is with ruby's gem. In most distro's the
+package is called 'rubygems'.
 
-        Keybindings:
-            <Space> - show the selected thread collapsing unmatched items
-            <Enter> - show the entire selected thread
-            a       - archive message (remove inbox tag)
-            f       - filter the current search terms
-            o       - toggle search screen order
-            m       - compose a new message
-            r       - reply to thread
-            s       - enter search criteria
-            ,s      - alter search criteria
-            t       - filter the current search terms with tags
-            q       - return to folder display, or undo filter
-            +       - add tag(s) to selected message
-            -       - remove tag(s) from selected message
-            =       - refresh display
-            ?       - reveal the thread ID of what's under cursor
-            ^]      - search using word under cursor
+Once you have gem, run:
 
-    [notmuch-show]
-        This is the display of the message.
+ % gem install mail
 
-        Keybindings:
-            <Space> - mark read, archive, go to next matching message
-            ^n      - next message
-            ^p      - previous message
-            b       - toggle folding of message bodies
-            c       - toggle folding of citations
-            h       - toggle folding of extra header lines
-            i       - toggle folding of signatures
-            m       - compose a new message
-            r       - reply to the message
-            s       - enter search criteria
-            q       - return to search display
-            ?       - reveal the message and thread IDs of what's under cursor
-            ^]      - search using word under cursor
+In some systems gems are installed on a per-user basis by default, so make sure
+you are running as the same user as the one that installed them.
 
-    [notmuch-compose]
-        When you're writing an email, you're in this mode.
+This gem is not mandatory, but it's extremely recommended.
 
-        Insert-mode keybindings:
-            <Tab>   - go to the next header line
+== Running ==
 
-        Normal-mode keybindings:
-            <Tab>   - go to the next header line
-            ,s      - send this message
-            ,q      - abort this message
+Simple:
 
+ % gvim -c ':NotMuch'
+
+Enjoy ;)
+
+== More stuff ==
+
+As an example to configure a key mapping to add the tag 'to-do' and archive,
+this is what I use:
+
+let g:notmuch_rb_custom_search_maps = {
+	\ 't':		'search_tag("+to-do -inbox")',
+	\ }
+
+let g:notmuch_rb_custom_show_maps = {
+	\ 't':		'show_tag("+to-do -inbox")',
+	\ }
